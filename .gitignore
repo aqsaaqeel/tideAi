@@ -1,0 +1,15 @@
+# Secrets — never commit PATs or tokens
+.env
+.env.local
+builder/.env
+builder/.env.local
+
+# Dependencies & build output
+**/node_modules/
+**/dist/
+
+# tideAI builder: generated UI bundle path
+builder/backend/public/
+
+.DS_Store
+*.log

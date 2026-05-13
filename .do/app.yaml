@@ -1,0 +1,28 @@
+# tideAI — DigitalOcean App Platform (single Docker service)
+#
+# 1. Push this repository to GitHub.
+# 2. Replace YOUR_GITHUB_USERNAME/YOUR_REPO with your real repo (e.g. aaqeel/tideAi).
+# 3. In DigitalOcean: Apps → Create App → GitHub → pick repo → "Edit app spec"
+#    and paste this file, or use doctl: doctl apps create --spec .do/app.yaml
+# 4. Authorize DigitalOcean to read the repo when prompted.
+# 5. Optional: Apps → your app → Settings → tideai web component → Environment Variables:
+#    add TIDEAI_DOCR_TOKEN (Encrypt) = PAT with registry read/write if DOCR push should not use the UI token.
+#
+# Build: Dockerfile in `builder/`; App Platform sets source_dir to `builder` so
+# `dockerfile_path: Dockerfile` is correct. PORT is set automatically (use http_port).
+
+name: tideai
+region: nyc
+services:
+  - name: web
+    github:
+      repo: YOUR_GITHUB_USERNAME/YOUR_REPO
+      branch: main
+      deploy_on_push: true
+    source_dir: builder
+    dockerfile_path: Dockerfile
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    http_port: 8080
+    health_check:
+      http_path: /health
