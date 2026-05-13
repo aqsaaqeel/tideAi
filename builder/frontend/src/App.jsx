@@ -20,12 +20,13 @@ export default function App() {
     };
   }, []);
 
-  async function handleSubmit({ prompt, do_token, deploy_mode }) {
+  async function handleSubmit({ prompt, do_token, knowledge_base_id, deploy_mode }) {
     setFormBusy(true);
     try {
       const { build_id, deploy_mode: server_deploy_mode } = await postBuild({
         prompt,
         do_token,
+        knowledge_base_id,
         deploy_mode,
       });
       setPhase("building");

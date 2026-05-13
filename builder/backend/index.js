@@ -23,6 +23,12 @@ import {
   pushBusyboxStaticImage,
 } from "./docr.js";
 import { createInferenceProxy } from "./inferenceProxy.js";
+import { createKbaasProxy } from "./kbaasProxy.js";
+import { createGenAiProxy } from "./genAiProxy.js";
+import {
+  listKnowledgeBasesForToken,
+  createKnowledgeBaseForToken,
+} from "./knowledgeBasesAdmin.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, ".env") });
@@ -35,6 +41,8 @@ const app = express();
 app.use(cors());
 /** Same-origin proxy for generated previews — must run before express.json so bodies stream. */
 app.use(createInferenceProxy());
+app.use(createKbaasProxy());
+app.use(createGenAiProxy());
 app.use(express.json({ limit: "2mb" }));
 
 /**
@@ -65,7 +73,7 @@ function upsertStep(buildId, stepName, status, detail = "") {
  * @param {object} parsed
  * @param {string} doToken
  * @param {string} githubToken
- * @param {{ omitInferenceProxy?: boolean }} [opts]
+ * @param {{ omitInferenceProxy?: boolean; omitKbaasProxy?: boolean; omitGenAiProxy?: boolean; knowledgeBaseId?: string }} [opts]
  * @returns {{ key: string, value: string }[]}
  */
 function resolveBuildTimeEnvs(parsed, doToken, githubToken, opts = {}) {
@@ -74,14 +82,24 @@ function resolveBuildTimeEnvs(parsed, doToken, githubToken, opts = {}) {
   for (const e of raw) {
     if (!e || typeof e.key !== "string") continue;
     if (opts.omitInferenceProxy && e.key === "VITE_INFERENCE_PROXY") continue;
+    if (opts.omitKbaasProxy && e.key === "VITE_KBAAS_PROXY") continue;
+    if (opts.omitGenAiProxy && e.key === "VITE_GEN_AI_PROXY") continue;
     let value = "";
     if (e.source === "user_do_token") value = doToken;
     else if (e.source === "user_github_token") value = githubToken;
+    else if (e.source === "user_knowledge_base_id")
+      value = String(opts.knowledgeBaseId || "").trim();
     else if (typeof e.value === "string") value = e.value;
     out.push({ key: e.key, value });
   }
   if (!out.some((x) => x.key === "VITE_DO_TOKEN")) {
     out.push({ key: "VITE_DO_TOKEN", value: doToken });
+  }
+  const kb = String(opts.knowledgeBaseId || "").trim();
+  if (kb) {
+    const i = out.findIndex((x) => x.key === "VITE_DO_KNOWLEDGE_BASE_ID");
+    if (i === -1) out.push({ key: "VITE_DO_KNOWLEDGE_BASE_ID", value: kb });
+    else out[i] = { key: "VITE_DO_KNOWLEDGE_BASE_ID", value: kb };
   }
   return out;
 }
@@ -128,6 +146,24 @@ function resolveDoToken(bodyToken) {
 }
 
 /**
+ * True when codegen asked for DigitalOcean Knowledge Bases (Tier B).
+ * @param {{ do_services?: unknown }} parsed
+ */
+function parsedRequestsKnowledgeBases(parsed) {
+  const raw = parsed && parsed.do_services;
+  if (!Array.isArray(raw)) return false;
+  return raw.some((x) => {
+    if (typeof x !== "string") return false;
+    return x.trim().replace(/\s+/g, " ").toLowerCase() === "knowledge bases";
+  });
+}
+
+function tideaiAutoKbDisabled() {
+  const v = String(process.env.TIDEAI_DISABLE_AUTO_KB || "").trim().toLowerCase();
+  return v === "true" || v === "1" || v === "yes";
+}
+
+/**
  * DOCR repository name (single path segment under your registry).
  * Starter tier allows **only one repository** per registry — each build must push new **tags** to the same repo.
  * @see https://docs.digitalocean.com/products/container-registry/details/pricing/
@@ -146,7 +182,14 @@ function resolveDocrRepoName() {
  * @param {"docr" | "github"} deploy_mode
  * @param {string | null} githubToken
  */
-async function runBuildPipeline(buildId, prompt, doToken, deploy_mode, githubToken) {
+async function runBuildPipeline(
+  buildId,
+  prompt,
+  doToken,
+  deploy_mode,
+  githubToken,
+  knowledgeBaseId = ""
+) {
   try {
     patchBuild(buildId, { status: "inferring", error: null });
     upsertStep(buildId, "Understanding your prompt", "in_progress", "Calling Serverless Inference…");
@@ -172,6 +215,43 @@ async function runBuildPipeline(buildId, prompt, doToken, deploy_mode, githubTok
         .replace(/^-|-$/g, "")
         .slice(0, 90) || `app-${buildId.slice(0, 8)}`;
 
+    let kbForBuild = String(knowledgeBaseId || "").trim();
+    if (
+      !kbForBuild &&
+      !tideaiAutoKbDisabled() &&
+      doToken &&
+      parsedRequestsKnowledgeBases(parsed)
+    ) {
+      try {
+        upsertStep(
+          buildId,
+          "Knowledge base setup",
+          "in_progress",
+          "Creating an empty Knowledge Base on DigitalOcean…"
+        );
+        const kb = await createKnowledgeBaseForToken(doToken, {
+          name: `${appSlug}-kb`.slice(0, 80),
+        });
+        kbForBuild = kb.uuid;
+        upsertStep(
+          buildId,
+          "Knowledge base setup",
+          "done",
+          `Ready (${kb.uuid.slice(0, 8)}…)`
+        );
+        log(buildId, "Auto-provisioned Knowledge Base", kb.uuid);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log(buildId, "Auto-provision Knowledge Base failed", msg);
+        upsertStep(
+          buildId,
+          "Knowledge base setup",
+          "done",
+          "Could not auto-create; build continues — link a KB in Advanced if you need one."
+        );
+      }
+    }
+
     if (deploy_mode === "github") {
       patchBuild(buildId, { status: "publishing" });
       upsertStep(buildId, "Creating GitHub repo", "in_progress", `Name: ${appSlug}`);
@@ -195,6 +275,9 @@ async function runBuildPipeline(buildId, prompt, doToken, deploy_mode, githubTok
 
       const envVars = resolveBuildTimeEnvs(parsed, doToken, githubToken || "", {
         omitInferenceProxy: true,
+        omitKbaasProxy: true,
+        omitGenAiProxy: true,
+        knowledgeBaseId: kbForBuild,
       });
       const appId = await createApp(
         doToken,
@@ -233,6 +316,9 @@ async function runBuildPipeline(buildId, prompt, doToken, deploy_mode, githubTok
         ...process.env,
         VITE_DO_TOKEN: doToken,
         VITE_INFERENCE_PROXY: "/api/inference",
+        VITE_KBAAS_PROXY: "/api/kbaas",
+        VITE_GEN_AI_PROXY: "/api/gen-ai",
+        VITE_DO_KNOWLEDGE_BASE_ID: kbForBuild,
         NODE_ENV: "production",
       };
       /** Vite's `--base` so generated `index.html` references assets at `/preview/<buildId>/assets/...`. */
@@ -262,6 +348,9 @@ async function runBuildPipeline(buildId, prompt, doToken, deploy_mode, githubTok
         ...process.env,
         VITE_DO_TOKEN: doToken,
         VITE_INFERENCE_PROXY: "/api/inference",
+        VITE_KBAAS_PROXY: "/api/kbaas",
+        VITE_GEN_AI_PROXY: "/api/gen-ai",
+        VITE_DO_KNOWLEDGE_BASE_ID: kbForBuild,
         NODE_ENV: "production",
       };
       const distDir = await buildViteProject(parsed.files, buildEnv, workRoot);
@@ -433,11 +522,77 @@ app.get("/api/config", (_req, res) => {
   });
 });
 
+/**
+ * List Knowledge Bases for the caller's DigitalOcean account (same token rules as /api/build).
+ */
+app.post("/api/knowledge-bases/list", async (req, res) => {
+  const do_token = resolveDoToken(req.body?.do_token);
+  if (!do_token) {
+    return res.status(400).json({
+      error:
+        "do_token is required in the JSON body (or set TIDEAI_DEFAULT_DO_TOKEN on the server) to list knowledge bases.",
+    });
+  }
+
+  try {
+    const { knowledge_bases } = await listKnowledgeBasesForToken(do_token);
+    res.json({ knowledge_bases });
+  } catch (e) {
+    res.status(502).json({
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+});
+
+/**
+ * Create a new (empty) Knowledge Base using defaults from DigitalOcean APIs.
+ * Optional overrides: name, region, project_id, embedding_model_uuid, vpc_uuid.
+ * Server env fallbacks: TIDEAI_KB_REGION (default tor1), TIDEAI_KB_VPC_UUID, TIDEAI_EMBEDDING_MODEL_UUID.
+ */
+app.post("/api/knowledge-bases/create", async (req, res) => {
+  const do_token = resolveDoToken(req.body?.do_token);
+  if (!do_token) {
+    return res.status(400).json({
+      error:
+        "do_token is required in the JSON body (or set TIDEAI_DEFAULT_DO_TOKEN on the server) to create a knowledge base.",
+    });
+  }
+
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const name = typeof body.name === "string" ? body.name : "";
+  const region = typeof body.region === "string" ? body.region : "";
+  const project_id = typeof body.project_id === "string" ? body.project_id : "";
+  const embedding_model_uuid =
+    typeof body.embedding_model_uuid === "string"
+      ? body.embedding_model_uuid
+      : "";
+  const vpc_uuid = typeof body.vpc_uuid === "string" ? body.vpc_uuid : "";
+
+  try {
+    const kb = await createKnowledgeBaseForToken(do_token, {
+      name,
+      region,
+      project_id,
+      embedding_model_uuid,
+      vpc_uuid,
+    });
+    res.json({ knowledge_base: kb });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const lower = msg.toLowerCase();
+    const code =
+      lower.includes("unauthorized") || lower.includes("forbidden") ? 403 : 502;
+    res.status(code).json({ error: msg });
+  }
+});
+
 app.post("/api/build", (req, res) => {
-  const { prompt, do_token: do_token_body } = req.body || {};
+  const { prompt, do_token: do_token_body, knowledge_base_id } = req.body || {};
   const deploy_mode = deployModeFromBody(req.body || {});
   const githubToken = resolveGithubToken(req.body || {});
   const do_token = resolveDoToken(do_token_body);
+  const knowledgeBaseId =
+    typeof knowledge_base_id === "string" ? knowledge_base_id.trim() : "";
 
   if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
     return res.status(400).json({ error: "prompt is required" });
@@ -466,7 +621,14 @@ app.post("/api/build", (req, res) => {
   });
 
   setImmediate(() => {
-    runBuildPipeline(buildId, prompt.trim(), do_token, deploy_mode, githubToken);
+    runBuildPipeline(
+      buildId,
+      prompt.trim(),
+      do_token,
+      deploy_mode,
+      githubToken,
+      knowledgeBaseId
+    );
   });
 
   res.json({ build_id: buildId, deploy_mode });

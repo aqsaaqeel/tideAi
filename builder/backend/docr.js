@@ -11,7 +11,7 @@ const CADDY_TGZ_URL =
   process.env.TIDEAI_CADDY_URL ||
   "https://github.com/caddyserver/caddy/releases/download/v2.8.4/caddy_2.8.4_linux_amd64.tar.gz";
 
-/** Serves Vite dist from /www and proxies /api/inference → inference.do-ai.run (avoids browser CORS on OPTIONS). */
+/** Serves Vite dist from /www and proxies /api/inference → inference.do-ai.run and /api/kbaas → kbaas.do-ai.run (avoids browser CORS on OPTIONS). */
 const STATIC_SITE_CADDYFILE = `:8080 {
   encode gzip
 
@@ -28,6 +28,38 @@ const STATIC_SITE_CADDYFILE = `:8080 {
     uri strip_prefix /api/inference
     reverse_proxy https://inference.do-ai.run:443 {
       header_up Host inference.do-ai.run
+    }
+  }
+
+  handle /api/kbaas* {
+    @kb_options method OPTIONS
+    handle @kb_options {
+      header Access-Control-Allow-Origin {http.request.header.Origin}
+      header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+      header Access-Control-Allow-Headers "Authorization, Content-Type, Accept"
+      header Access-Control-Max-Age "86400"
+      header Vary Origin
+      respond 204
+    }
+    uri strip_prefix /api/kbaas
+    reverse_proxy https://kbaas.do-ai.run:443 {
+      header_up Host kbaas.do-ai.run
+    }
+  }
+
+  handle /api/gen-ai* {
+    @ga_options method OPTIONS
+    handle @ga_options {
+      header Access-Control-Allow-Origin {http.request.header.Origin}
+      header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+      header Access-Control-Allow-Headers "Authorization, Content-Type, Accept"
+      header Access-Control-Max-Age "86400"
+      header Vary Origin
+      respond 204
+    }
+    uri replace /api/gen-ai /v2/gen-ai
+    reverse_proxy https://api.digitalocean.com:443 {
+      header_up Host api.digitalocean.com
     }
   }
 
@@ -221,7 +253,7 @@ export async function listRegistryRepositorySlugs(doToken, registryName) {
  * Starter tier allows **one** repository per registry. If that slot is already used under
  * a different name than `desiredSlug`, reuse it (each tideAI build still gets a new **tag**).
  *
- * @param {{ doToken: string, registryName: string, desiredSlug: string, log?: (msg: string) => void }}
+ * @param {{ doToken: string, registryName: string, desiredSlug: string, log?: (msg: string) => void }} opts
  * @returns {Promise<string>}
  */
 export async function pickDocrRepositorySlug({
@@ -823,6 +855,10 @@ export async function pushBusyboxStaticImage(opts) {
     );
   }
 
+  /**
+   * Prefer registry-issued `Docker-Content-Digest`; fall back to a local sha256 of the
+   * exact bytes we PUT so App Platform can pin to digest (avoids tag-indexing lag → 404).
+   */
   const digestHdr =
     manRes.headers.get("docker-content-digest") ||
     manRes.headers.get("Docker-Content-Digest");

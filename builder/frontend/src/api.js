@@ -1,4 +1,5 @@
-const base = () => {
+/** Base URL for the tideAI backend API (no trailing slash). */
+export function apiBase() {
   const raw = import.meta.env.VITE_API_URL;
   if (raw !== undefined && raw !== null && String(raw).trim() !== "") {
     return String(raw).replace(/\/$/, "");
@@ -7,13 +8,13 @@ const base = () => {
     return "http://localhost:3001".replace(/\/$/, "");
   }
   return "";
-};
+}
 
 /**
  * @returns {Promise<{ default_do_token_configured: boolean }>}
  */
 export async function fetchConfig() {
-  const res = await fetch(`${base()}/api/config`);
+  const res = await fetch(`${apiBase()}/api/config`);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(data.error || `Config request failed (${res.status})`);
@@ -24,11 +25,11 @@ export async function fetchConfig() {
 }
 
 /**
- * @param {{ prompt: string, do_token?: string, github_token?: string, deploy_mode?: string }} body
+ * @param {{ prompt: string, do_token?: string, knowledge_base_id?: string, github_token?: string, deploy_mode?: string }} body
  * @returns {Promise<{ build_id: string, deploy_mode: string }>}
  */
 export async function postBuild(body) {
-  const res = await fetch(`${base()}/api/build`, {
+  const res = await fetch(`${apiBase()}/api/build`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -44,12 +45,76 @@ export async function postBuild(body) {
 }
 
 /**
+ * List DigitalOcean Knowledge Bases for the given token (or server default token).
+ *
+ * @param {string | undefined} do_token optional; omit or empty to use server default when configured
+ * @returns {Promise<{ knowledge_bases: { uuid: string, name: string }[] }>}
+ */
+export async function postKnowledgeBasesList(do_token) {
+  const body =
+    typeof do_token === "string" && do_token.trim()
+      ? { do_token: do_token.trim() }
+      : {};
+  const res = await fetch(`${apiBase()}/api/knowledge-bases/list`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof data.error === "string"
+        ? data.error
+        : typeof data.message === "string"
+          ? data.message
+          : `Knowledge bases list failed (${res.status})`
+    );
+  }
+  const list = Array.isArray(data.knowledge_bases) ? data.knowledge_bases : [];
+  return { knowledge_bases: list };
+}
+
+/**
+ * Create a new DigitalOcean Knowledge Base (empty; add files via the generated app or DO console).
+ *
+ * @param {Record<string, unknown>} payload optional do_token, name, region, project_id, embedding_model_uuid, vpc_uuid
+ * @returns {Promise<{ knowledge_base: { uuid: string, name: string } }>}
+ */
+export async function postKnowledgeBasesCreate(payload = {}) {
+  const res = await fetch(`${apiBase()}/api/knowledge-bases/create`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof data.error === "string"
+        ? data.error
+        : typeof data.message === "string"
+          ? data.message
+          : `Create knowledge base failed (${res.status})`
+    );
+  }
+  const kb = data.knowledge_base;
+  if (!kb || typeof kb.uuid !== "string") {
+    throw new Error("Invalid response: missing knowledge_base.uuid");
+  }
+  return {
+    knowledge_base: {
+      uuid: kb.uuid,
+      name: typeof kb.name === "string" ? kb.name : kb.uuid,
+    },
+  };
+}
+
+/**
  * @param {string} buildId
  * @param {(state: object) => void} onEvent
  * @returns {() => void} cleanup — closes EventSource
  */
 export function subscribeBuild(buildId, onEvent) {
-  const url = `${base()}/api/build/${encodeURIComponent(buildId)}`;
+  const url = `${apiBase()}/api/build/${encodeURIComponent(buildId)}`;
   const es = new EventSource(url);
 
   es.onmessage = (ev) => {
