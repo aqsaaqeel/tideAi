@@ -508,15 +508,21 @@ app.get("/api/build/:buildId", (req, res) => {
 });
 
 if (fs.existsSync(publicDir)) {
-  app.use(
-    express.static(publicDir, {
-      setHeaders(res, filePath) {
-        if (path.basename(filePath) === "index.html") {
-          res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
-        }
-      },
-    })
-  );
+  const staticMw = express.static(publicDir, {
+    setHeaders(res, filePath) {
+      if (path.basename(filePath) === "index.html") {
+        res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+      }
+    },
+  });
+  /** `express.static` + POST can yield 405; only static-serve safe methods. */
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      next();
+      return;
+    }
+    staticMw(req, res, next);
+  });
   app.get("*", (_req, res) => {
     res.sendFile(path.join(publicDir, "index.html"));
   });
