@@ -7,6 +7,48 @@ const ASYNC_POLL_MS = 1500;
 const ASYNC_DEADLINE_MS = 120_000;
 
 /**
+ * Remember the bearer used to start an async-invoke job so we can re-attach it on the
+ * polling GETs (`/v1/async-invoke/<id>` and `/v1/async-invoke/<id>/status`) when generated
+ * apps forget the Authorization header on subsequent fetches. Without this, DO returns
+ * 401 "Unable to authenticate you" on every status poll.
+ */
+const ASYNC_AUTH_TTL_MS = 30 * 60 * 1000;
+const ASYNC_AUTH_MAX_ENTRIES = 1000;
+/** @type {Map<string, { authorization: string; expiresAt: number }>} */
+const asyncInvokeAuthCache = new Map();
+
+function pruneAsyncAuthCache() {
+  const now = Date.now();
+  for (const [k, v] of asyncInvokeAuthCache) {
+    if (v.expiresAt <= now) asyncInvokeAuthCache.delete(k);
+  }
+  while (asyncInvokeAuthCache.size > ASYNC_AUTH_MAX_ENTRIES) {
+    const oldest = asyncInvokeAuthCache.keys().next().value;
+    if (!oldest) break;
+    asyncInvokeAuthCache.delete(oldest);
+  }
+}
+
+function rememberAsyncInvokeAuth(requestId, authorization) {
+  if (!requestId || !authorization) return;
+  asyncInvokeAuthCache.set(requestId, {
+    authorization,
+    expiresAt: Date.now() + ASYNC_AUTH_TTL_MS,
+  });
+  pruneAsyncAuthCache();
+}
+
+function recallAsyncInvokeAuth(requestId) {
+  const e = asyncInvokeAuthCache.get(requestId);
+  if (!e) return null;
+  if (e.expiresAt <= Date.now()) {
+    asyncInvokeAuthCache.delete(requestId);
+    return null;
+  }
+  return e.authorization;
+}
+
+/**
  * Local previews use Vite `base` `/preview/<buildId>/`. If generated code prefixes
  * `fetch` with `import.meta.env.BASE_URL`, the browser calls
  * `/preview/<id>/api/inference/...` instead of `/api/inference/...`, missing this
@@ -303,6 +345,28 @@ export function createInferenceProxy() {
     const pathOnUpstream = tail.startsWith("/") ? tail : `/${tail}`;
     const upstreamPathOnly = pathOnUpstream.split("?")[0];
     const legacyInfer = upstreamPathOnly.match(/^\/v1\/models\/(.+)\/infer$/);
+    const asyncInvokeStart =
+      req.method === "POST" &&
+      (upstreamPathOnly === "/v1/async-invoke" ||
+        upstreamPathOnly === "/v1/async-invoke/");
+    const asyncInvokeDetailMatch = upstreamPathOnly.match(
+      /^\/v1\/async-invoke\/([^/]+)(?:\/status)?$/
+    );
+
+    /**
+     * Generated apps sometimes call `fetch(.../v1/async-invoke/<id>/status)` without
+     * `Authorization`. If we remember the bearer the same browser used to start the job,
+     * re-attach it here so DO does not 401 the polls.
+     */
+    if (
+      req.method === "GET" &&
+      asyncInvokeDetailMatch &&
+      !req.headers.authorization
+    ) {
+      const id = decodeURIComponent(asyncInvokeDetailMatch[1] || "");
+      const remembered = recallAsyncInvokeAuth(id);
+      if (remembered) req.headers.authorization = remembered;
+    }
 
     if (legacyInfer && req.method === "POST") {
       const authorization = req.headers.authorization;
@@ -408,6 +472,58 @@ export function createInferenceProxy() {
       },
       (upstreamRes) => {
         const origin = req.headers.origin || "*";
+
+        /**
+         * For POST `/v1/async-invoke`, buffer the (small JSON) response so we can
+         * extract `request_id` and remember the caller's bearer for the polling GETs.
+         * Other paths are streamed straight through as before.
+         */
+        if (asyncInvokeStart) {
+          const chunks = [];
+          upstreamRes.on("data", (c) => chunks.push(c));
+          upstreamRes.on("end", () => {
+            const buf = Buffer.concat(chunks);
+            const upstreamAuth = req.headers.authorization;
+            const status = upstreamRes.statusCode || 0;
+            if (
+              status >= 200 &&
+              status < 300 &&
+              typeof upstreamAuth === "string" &&
+              upstreamAuth.trim()
+            ) {
+              try {
+                const j = JSON.parse(buf.toString("utf8"));
+                const rid =
+                  typeof j?.request_id === "string"
+                    ? j.request_id
+                    : typeof j?.id === "string"
+                      ? j.id
+                      : "";
+                if (rid) rememberAsyncInvokeAuth(rid, upstreamAuth);
+              } catch {
+                /* non-JSON upstream response — nothing to remember */
+              }
+            }
+            res.statusCode = status || 502;
+            for (const [k, v] of Object.entries(upstreamRes.headers)) {
+              if (!k) continue;
+              const lk = k.toLowerCase();
+              if (lk === "transfer-encoding" || lk === "content-length") continue;
+              if (Array.isArray(v)) {
+                for (const item of v) res.append(k, item);
+              } else if (v !== undefined) {
+                res.setHeader(k, v);
+              }
+            }
+            res.setHeader("Access-Control-Allow-Origin", origin);
+            res.setHeader("Vary", "Origin");
+            res.setHeader("Access-Control-Allow-Credentials", "true");
+            res.setHeader("Content-Length", String(buf.length));
+            res.end(buf);
+          });
+          return;
+        }
+
         res.statusCode = upstreamRes.statusCode || 502;
         for (const [k, v] of Object.entries(upstreamRes.headers)) {
           if (!k || k.toLowerCase() === "transfer-encoding") continue;

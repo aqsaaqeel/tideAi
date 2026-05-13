@@ -207,6 +207,29 @@ async function runBuildPipeline(
     upsertStep(buildId, "Generating code", "done", `${parsed.files.length} files`);
     log(buildId, "Step: codegen done", `${parsed.app_name}`);
 
+    /**
+     * Surface a small subset of the parsed codegen on the build state so the UI can
+     * render a cost breakdown (`do_services` decides which DigitalOcean line items
+     * apply). Keeps the SSE payload light by not including the generated files.
+     */
+    patchBuild(buildId, {
+      app_spec: {
+        app_name: typeof parsed.app_name === "string" ? parsed.app_name : "",
+        description:
+          typeof parsed.description === "string" ? parsed.description : "",
+        do_services: Array.isArray(parsed.do_services)
+          ? parsed.do_services.filter((x) => typeof x === "string")
+          : [],
+        env_vars: Array.isArray(parsed.env_vars)
+          ? parsed.env_vars
+              .filter(
+                (e) => e && typeof e === "object" && typeof e.key === "string"
+              )
+              .map((e) => ({ key: e.key, source: e.source ?? null }))
+          : [],
+      },
+    });
+
     const appSlug =
       String(parsed.app_name)
         .toLowerCase()
@@ -611,6 +634,11 @@ app.post("/api/build", (req, res) => {
   }
 
   const buildId = randomUUID();
+  /**
+   * `prompt`, `do_token`, `knowledge_base_id` are kept in process memory only — they let
+   * `POST /api/build/:buildId/redeploy` reuse the same inputs without forcing the user to
+   * re-enter the form. They are never serialized in the SSE payload (`/api/build/:buildId`).
+   */
   setBuild(buildId, {
     status: "inferring",
     steps: [],
@@ -618,6 +646,10 @@ app.post("/api/build", (req, res) => {
     repo: null,
     error: null,
     deploy_mode,
+    prompt: prompt.trim(),
+    do_token,
+    knowledge_base_id: knowledgeBaseId,
+    app_spec: null,
   });
 
   setImmediate(() => {
@@ -632,6 +664,56 @@ app.post("/api/build", (req, res) => {
   });
 
   res.json({ build_id: buildId, deploy_mode });
+});
+
+/**
+ * Re-run the same prompt against DOCR using the inputs the original build was started
+ * with. Used by the "Cost & deploy" CTA on the local-preview Result screen so the user
+ * can promote a preview to a real DigitalOcean App Platform deployment.
+ */
+app.post("/api/build/:buildId/redeploy", (req, res) => {
+  const { buildId } = req.params;
+  const old = getBuild(buildId);
+  if (!old) {
+    return res.status(404).json({ error: "Unknown build_id" });
+  }
+  const promptText = typeof old.prompt === "string" ? old.prompt.trim() : "";
+  const oldToken = typeof old.do_token === "string" ? old.do_token : "";
+  if (!promptText || !oldToken) {
+    return res.status(409).json({
+      error:
+        "This build cannot be redeployed automatically (missing prompt or token in memory). Re-run the form.",
+    });
+  }
+
+  const targetMode = "docr";
+  const newId = randomUUID();
+  setBuild(newId, {
+    status: "inferring",
+    steps: [],
+    url: null,
+    repo: null,
+    error: null,
+    deploy_mode: targetMode,
+    prompt: promptText,
+    do_token: oldToken,
+    knowledge_base_id:
+      typeof old.knowledge_base_id === "string" ? old.knowledge_base_id : "",
+    app_spec: null,
+  });
+
+  setImmediate(() => {
+    runBuildPipeline(
+      newId,
+      promptText,
+      oldToken,
+      targetMode,
+      null,
+      typeof old.knowledge_base_id === "string" ? old.knowledge_base_id : ""
+    );
+  });
+
+  res.json({ build_id: newId, deploy_mode: targetMode });
 });
 
 app.get("/api/build/:buildId", (req, res) => {
@@ -663,6 +745,7 @@ app.get("/api/build/:buildId", (req, res) => {
       repo: b.repo,
       error: b.error,
       deploy_mode: b.deploy_mode ?? "docr",
+      app_spec: b.app_spec ?? null,
     };
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
     if (b.status === "live" || b.status === "failed") {

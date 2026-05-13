@@ -109,6 +109,35 @@ export async function postKnowledgeBasesCreate(payload = {}) {
 }
 
 /**
+ * Re-run the same prompt+token+KB id against DOCR. Returns the new build_id so the UI
+ * can transition to the building view. The original build object stays in memory.
+ *
+ * @param {string} buildId build to redeploy from
+ * @returns {Promise<{ build_id: string, deploy_mode: string }>}
+ */
+export async function postRedeploy(buildId) {
+  const res = await fetch(
+    `${apiBase()}/api/build/${encodeURIComponent(buildId)}/redeploy`,
+    { method: "POST" }
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof data.error === "string"
+        ? data.error
+        : `Redeploy failed (${res.status})`
+    );
+  }
+  if (!data.build_id) {
+    throw new Error("Invalid response: missing build_id");
+  }
+  return {
+    build_id: data.build_id,
+    deploy_mode: data.deploy_mode || "docr",
+  };
+}
+
+/**
  * @param {string} buildId
  * @param {(state: object) => void} onEvent
  * @returns {() => void} cleanup — closes EventSource
