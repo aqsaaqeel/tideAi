@@ -143,20 +143,54 @@ export async function pollUntilLive(doToken, appId, onProgress) {
 }
 
 /**
- * @param {string} doToken
- * @param {string} specName App Platform app name (short, DNS-safe)
- * @param {string} repository e.g. "my-registry/tideai-abc" for DOCR
- * @param {string} tag image tag
+ * @param {string} msg
+ */
+function isImageNotFoundAppError(msg) {
+  const m = msg.toLowerCase();
+  return (
+    m.includes("not found") &&
+    (m.includes("image") || m.includes("tag") || m.includes("digest"))
+  );
+}
+
+/**
+ * Create an App Platform app from a DOCR image.
+ * Uses manifest **digest** when provided (avoids tag indexing lag).
+ *
+ * @param {object} opts
+ * @param {string} opts.doToken
+ * @param {string} opts.specName App Platform app name (short, DNS-safe)
+ * @param {string} opts.repository e.g. "my-registry/tideai-apps"
+ * @param {string} opts.tag image tag (used only if digest omitted)
+ * @param {string | null | undefined} opts.manifestDigest OCI manifest digest, e.g. sha256:…
+ * @param {(msg: string) => void} [opts.log]
  * @returns {Promise<string>} app id
  */
-export async function createAppFromDocrImage(doToken, specName, repository, tag) {
+export async function createAppFromDocrImage(opts) {
+  const {
+    doToken,
+    specName,
+    repository,
+    tag,
+    manifestDigest,
+    log,
+  } = opts;
+
   /** App spec `image.deploy_on_push` is an object `{ enabled }`, not a boolean (DO API 400 otherwise). */
   const image = {
     registry_type: "DOCR",
     repository,
-    tag,
     deploy_on_push: { enabled: false },
   };
+  const d =
+    typeof manifestDigest === "string" && manifestDigest.trim()
+      ? manifestDigest.trim()
+      : "";
+  if (d) {
+    image.digest = d;
+  } else {
+    image.tag = tag;
+  }
 
   const body = {
     spec: {
@@ -176,29 +210,49 @@ export async function createAppFromDocrImage(doToken, specName, repository, tag)
     },
   };
 
-  const res = await fetch(`${DO_API}/apps`, {
-    method: "POST",
-    headers: doHeaders(doToken),
-    body: JSON.stringify(body),
-  });
+  const maxAttempts = 10;
+  let lastErr = "unknown error";
 
-  const text = await res.text();
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    json = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = await fetch(`${DO_API}/apps`, {
+      method: "POST",
+      headers: doHeaders(doToken),
+      body: JSON.stringify(body),
+    });
+
+    const text = await res.text();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = null;
+    }
+
+    if (res.ok) {
+      const appId = json?.app?.id;
+      if (!appId) {
+        throw new Error("DO create app response missing app.id");
+      }
+      return String(appId);
+    }
+
+    lastErr = (json?.message || text).slice(0, 600);
+    const retry =
+      res.status === 404 &&
+      attempt < maxAttempts &&
+      isImageNotFoundAppError(lastErr);
+
+    if (retry) {
+      const waitMs = 2500 + attempt * 750;
+      log?.(
+        `App create 404 (image not visible yet); retry in ${waitMs}ms (${attempt}/${maxAttempts})…`
+      );
+      await new Promise((r) => setTimeout(r, waitMs));
+      continue;
+    }
+
+    throw new Error(`DO create app failed ${res.status}: ${lastErr}`);
   }
 
-  if (!res.ok) {
-    throw new Error(
-      `DO create app failed ${res.status}: ${(json?.message || text).slice(0, 600)}`
-    );
-  }
-
-  const appId = json?.app?.id;
-  if (!appId) {
-    throw new Error("DO create app response missing app.id");
-  }
-  return String(appId);
+  throw new Error(`DO create app failed after retries: ${lastErr}`);
 }

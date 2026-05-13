@@ -14,6 +14,7 @@ The UI is a minimal React + Vite single page that talks to a Node + Express back
 
 - Node.js 18+ (uses global `fetch`)  
 - **[Container Registry](https://docs.digitalocean.com/products/container-registry/)** — if your account has none yet, tideAI will try to **create** one automatically ( **`subscription_tier_slug`: `starter`** by default). Your API token must allow **`registry:create`** for that to succeed. Set **`TIDEAI_AUTO_CREATE_REGISTRY=false`** to skip auto-create and get a clear manual error instead. Override tier with **`DO_REGISTRY_SUBSCRIPTION_TIER`** (`starter`, `basic`, or `professional`). Optional **`DO_REGISTRY_REGION`** (e.g. `nyc3`, `sfo3`).  
+- **Starter registry = one repository:** if your registry already has a repository (any name), tideAI **reuses that repository** and pushes a **new tag** per build. To force a name, set **`TIDEAI_DOCR_REPO_NAME`** on the server (must match your existing repo slug on Starter, or upgrade the registry tier for more repositories).  
 - A **DigitalOcean personal access token** with permission to use **Serverless Inference**, **App Platform** (create apps), and **Container Registry** (read + write / docker-credentials). During testing, a broad **read + write** token is simplest.  
 - The machine running the tideAI backend must have a **`tar`** binary on `PATH` (included in `node:*-alpine` Docker images).  
 - Outbound HTTPS to **`busybox.net`** (static busybox binary) unless you override **`TIDEAI_BUSYBOX_URL`** in the environment.

@@ -144,6 +144,111 @@ export async function getRegistryNameOrThrow(doToken) {
 }
 
 /**
+ * DO API may return `name` as a slug or `registry/repo`; image path uses the last segment only.
+ * @param {string} name
+ */
+function slugFromApiRepositoryField(name) {
+  const s = name.trim();
+  const i = s.lastIndexOf("/");
+  return i === -1 ? s : s.slice(i + 1);
+}
+
+/**
+ * Repository slugs already present in this registry (for Starter single-repo logic).
+ *
+ * @param {string} doToken
+ * @param {string} registryName
+ * @returns {Promise<string[]>}
+ */
+export async function listRegistryRepositorySlugs(doToken, registryName) {
+  const encoded = encodeURIComponent(registryName);
+  const bases = [
+    `${DO_API}/registries/${encoded}/repositoriesV2`,
+    `${DO_API}/registry/${encoded}/repositoriesV2`,
+  ];
+
+  for (const basePath of bases) {
+    const slugs = [];
+    let url = `${basePath}?per_page=200`;
+    let firstRequest = true;
+    for (let page = 0; page < 50; page++) {
+      const res = await fetch(url, { headers: apiHeaders(doToken) });
+      const text = await res.text();
+      let json;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = null;
+      }
+      if (res.status === 404) {
+        if (firstRequest) break;
+        throw new Error(
+          `Could not list registry repositories (${res.status}): ${(json?.message || text).slice(0, 400)}`
+        );
+      }
+      firstRequest = false;
+      if (!res.ok) {
+        throw new Error(
+          `Could not list registry repositories (${res.status}): ${(json?.message || text).slice(0, 400)}`
+        );
+      }
+      for (const r of json?.repositories || []) {
+        const raw =
+          typeof r?.name === "string"
+            ? r.name
+            : typeof r?.repository === "string"
+              ? r.repository
+              : "";
+        const slug = slugFromApiRepositoryField(raw);
+        if (slug) slugs.push(slug);
+      }
+      const next = json?.links?.pages?.next;
+      if (typeof next === "string" && next.length > 0) {
+        url = next.startsWith("http")
+          ? next
+          : `https://api.digitalocean.com${next.startsWith("/") ? "" : "/"}${next}`;
+        continue;
+      }
+      return [...new Set(slugs)];
+    }
+  }
+  throw new Error(
+    `Could not list registry repositories (404): no list route matched for registry "${registryName}". Confirm the registry exists and your token has registry:read.`
+  );
+}
+
+/**
+ * Starter tier allows **one** repository per registry. If that slot is already used under
+ * a different name than `desiredSlug`, reuse it (each tideAI build still gets a new **tag**).
+ *
+ * @param {{ doToken: string, registryName: string, desiredSlug: string, log?: (msg: string) => void }}
+ * @returns {Promise<string>}
+ */
+export async function pickDocrRepositorySlug({
+  doToken,
+  registryName,
+  desiredSlug,
+  log,
+}) {
+  const trimmed = desiredSlug.trim();
+  const want = trimmed.toLowerCase();
+  const existing = await listRegistryRepositorySlugs(doToken, registryName);
+  const byLower = new Map(existing.map((s) => [s.toLowerCase(), s]));
+  if (byLower.has(want)) return byLower.get(want) || trimmed;
+  if (existing.length === 0) return trimmed;
+  if (existing.length === 1) {
+    const only = existing[0];
+    if (only.toLowerCase() !== want) {
+      log?.(
+        `Reusing existing DOCR repository "${only}" (registry already has 1 repository; Starter limit is 1). This build pushes tag only. Set TIDEAI_DOCR_REPO_NAME=${only} to silence.`
+      );
+      return only;
+    }
+  }
+  return trimmed;
+}
+
+/**
  * Docker config.json `auth` value (base64 user:pass) for `Authorization: Basic …` against registry.digitalocean.com.
  * Uses `/v2/registries/{name}/docker-credentials` so pushes work when the account has **multiple** registries; the
  * legacy `/v2/registry/docker-credentials` route can return credentials that 401 on blob upload for a named registry.
@@ -514,7 +619,7 @@ async function downloadCaddy(destExecPath) {
  * @param {string} opts.tag
  * @param {string} opts.distDir absolute path to Vite dist
  * @param {(msg: string) => void} [opts.log]
- * @returns {Promise<{ repository: string, tag: string, registryConsoleUrl: string }>}
+ * @returns {Promise<{ repository: string, tag: string, manifestDigest: string, registryConsoleUrl: string }>}
  */
 export async function pushBusyboxStaticImage(opts) {
   const { doToken, registryName, repoName, tag, distDir, log } = opts;
@@ -545,7 +650,7 @@ export async function pushBusyboxStaticImage(opts) {
           `Reason from DigitalOcean: ${e.docrMessage}\n\n` +
           `Most likely cause: your **Starter** registry already has its **1 repository** slot used (often by a leftover ` +
           `from a previous failed/manual push, even if the dashboard does not show it). Fix with one of:\n` +
-          `  1. List repos with: curl -H "Authorization: Bearer $TOKEN" "https://api.digitalocean.com/v2/registries/${registryName}/repositories"\n` +
+          `  1. List repos with: curl -H "Authorization: Bearer $TOKEN" "https://api.digitalocean.com/v2/registries/${registryName}/repositoriesV2?per_page=200"\n` +
           `     and DELETE the leftover repo via the DO control panel or:\n` +
           `       curl -X DELETE -H "Authorization: Bearer $TOKEN" "https://api.digitalocean.com/v2/registries/${registryName}/repositories/<name>"\n` +
           `  2. Then run **garbage collection** in the DO Container Registry UI to free the slot.\n` +
@@ -703,12 +808,13 @@ export async function pushBusyboxStaticImage(opts) {
     ],
   };
 
+  const manifestBody = JSON.stringify(manifest);
   const manRes = await regFetch(`${base}/manifests/${encodeURIComponent(tag)}`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/vnd.oci.image.manifest.v1+json",
     },
-    body: JSON.stringify(manifest),
+    body: manifestBody,
   });
   if (!manRes.ok) {
     const t = await manRes.text();
@@ -717,11 +823,22 @@ export async function pushBusyboxStaticImage(opts) {
     );
   }
 
+  const digestHdr =
+    manRes.headers.get("docker-content-digest") ||
+    manRes.headers.get("Docker-Content-Digest");
+  const computedManifestDigest =
+    "sha256:" +
+    createHash("sha256").update(manifestBody, "utf8").digest("hex");
+  const manifestDigest =
+    typeof digestHdr === "string" && digestHdr.trim()
+      ? digestHdr.trim()
+      : computedManifestDigest;
+
   const registryConsoleUrl = `https://cloud.digitalocean.com/registry/${encodeURIComponent(
     registryName
   )}/repositories/${encodeURIComponent(repoName)}`;
 
-  return { repository: rp, tag, registryConsoleUrl };
+  return { repository: rp, tag, manifestDigest, registryConsoleUrl };
   } finally {
     await fs.rm(layerRoot, { recursive: true, force: true }).catch(() => {});
   }

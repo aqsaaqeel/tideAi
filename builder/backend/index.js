@@ -19,6 +19,7 @@ import {
 import { buildViteProject } from "./buildProject.js";
 import {
   getRegistryNameOrThrow,
+  pickDocrRepositorySlug,
   pushBusyboxStaticImage,
 } from "./docr.js";
 import { createInferenceProxy } from "./inferenceProxy.js";
@@ -272,7 +273,13 @@ async function runBuildPipeline(buildId, prompt, doToken, deploy_mode, githubTok
 
       const docrToken = resolveDocrToken(doToken);
       const registryName = await getRegistryNameOrThrow(docrToken);
-      const repoName = resolveDocrRepoName();
+      const desiredRepo = resolveDocrRepoName();
+      const repoName = await pickDocrRepositorySlug({
+        doToken: docrToken,
+        registryName,
+        desiredSlug: desiredRepo,
+        log: (m) => log(buildId, "docr", m),
+      });
       const imageTag = `b-${buildId.replace(/-/g, "")}`;
 
       const push = await pushBusyboxStaticImage({
@@ -299,12 +306,14 @@ async function runBuildPipeline(buildId, prompt, doToken, deploy_mode, githubTok
       upsertStep(buildId, "Deploying to DigitalOcean", "in_progress", "Creating App Platform app…");
       log(buildId, "Step: DO createApp (DOCR image)");
 
-      const appId = await createAppFromDocrImage(
+      const appId = await createAppFromDocrImage({
         doToken,
         specName,
-        push.repository,
-        push.tag
-      );
+        repository: push.repository,
+        tag: push.tag,
+        manifestDigest: push.manifestDigest,
+        log: (m) => log(buildId, "deploy", m),
+      });
       upsertStep(buildId, "Deploying to DigitalOcean", "done", `App ID ${appId}`);
       log(buildId, "Step: DO app created", appId);
 
