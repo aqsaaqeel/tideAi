@@ -137,30 +137,40 @@ async function resolveEmbeddingModelUuid(token, explicitModelUuid) {
       )
     : [];
 
-  for (const row of arr) {
-    if (!row || typeof row !== "object") continue;
-    const o = /** @type {Record<string, unknown>} */ (row);
-    const model = /** @type {Record<string, unknown>} */ (o.model || o);
+  /**
+   * DigitalOcean's GenAI models API now exposes embedding models via
+   * `type: "embedding"` + `capabilities: ["vectorization"]`. The old field
+   * name was `usecases: ["KNOWLEDGEBASE"]` — both schemas are checked here so
+   * the code keeps working if either is present.
+   */
+  function isEmbeddingModel(model, row) {
+    const type = String(model.type || row?.type || "").toLowerCase();
+    if (type === "embedding") return true;
+    const caps = Array.isArray(model.capabilities)
+      ? model.capabilities
+      : Array.isArray(row?.capabilities)
+        ? row.capabilities
+        : [];
+    if (caps.some((c) => String(c).toLowerCase().includes("vector"))) return true;
     const usecases = Array.isArray(model.usecases)
       ? model.usecases
-      : Array.isArray(o.usecases)
-        ? o.usecases
+      : Array.isArray(row?.usecases)
+        ? row.usecases
         : [];
-    const kbOk = usecases.some((u) =>
-      String(u).toUpperCase().includes("KNOWLEDGEBASE")
-    );
-    const uuid = String(model.uuid || "").trim();
-    if (kbOk && uuid) return uuid;
+    if (usecases.some((u) => String(u).toUpperCase().includes("KNOWLEDGEBASE"))) return true;
+    return false;
   }
+
   for (const row of arr) {
     if (!row || typeof row !== "object") continue;
     const o = /** @type {Record<string, unknown>} */ (row);
     const model = /** @type {Record<string, unknown>} */ (o.model || o);
+    if (!isEmbeddingModel(model, o)) continue;
     const uuid = String(model.uuid || "").trim();
     if (uuid) return uuid;
   }
   throw new Error(
-    "No suitable embedding model found. Set TIDEAI_EMBEDDING_MODEL_UUID on the server or pass embedding_model_uuid when creating a KB."
+    "No suitable embedding model found in DO catalog (looked for type=embedding or capabilities including 'vector'). Set TIDEAI_EMBEDDING_MODEL_UUID on the server or pass embedding_model_uuid when creating a KB."
   );
 }
 

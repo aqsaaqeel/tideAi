@@ -11,21 +11,11 @@ export function apiBase() {
 }
 
 /**
- * @returns {Promise<{ default_do_token_configured: boolean }>}
- */
-export async function fetchConfig() {
-  const res = await fetch(`${apiBase()}/api/config`);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data.error || `Config request failed (${res.status})`);
-  }
-  return {
-    default_do_token_configured: Boolean(data.default_do_token_configured),
-  };
-}
-
-/**
- * @param {{ prompt: string, do_token?: string, knowledge_base_id?: string, github_token?: string, deploy_mode?: string }} body
+ * Submit a new build. The server parks the build at `awaiting_approval` once codegen
+ * finishes and surfaces the blueprint + cost via SSE. The caller approves/cancels
+ * with {@link postApprove}/{@link postCancel}.
+ *
+ * @param {{ prompt: string }} body
  * @returns {Promise<{ build_id: string, deploy_mode: string }>}
  */
 export async function postBuild(body) {
@@ -45,96 +35,36 @@ export async function postBuild(body) {
 }
 
 /**
- * List DigitalOcean Knowledge Bases for the given token (or server default token).
- *
- * @param {string | undefined} do_token optional; omit or empty to use server default when configured
- * @returns {Promise<{ knowledge_bases: { uuid: string, name: string }[] }>}
+ * Approve a parked build. Server moves it from `awaiting_approval` to `provisioning`
+ * and the SSE stream continues to surface progress.
  */
-export async function postKnowledgeBasesList(do_token) {
-  const body =
-    typeof do_token === "string" && do_token.trim()
-      ? { do_token: do_token.trim() }
-      : {};
-  const res = await fetch(`${apiBase()}/api/knowledge-bases/list`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(
-      typeof data.error === "string"
-        ? data.error
-        : typeof data.message === "string"
-          ? data.message
-          : `Knowledge bases list failed (${res.status})`
-    );
-  }
-  const list = Array.isArray(data.knowledge_bases) ? data.knowledge_bases : [];
-  return { knowledge_bases: list };
-}
-
-/**
- * Create a new DigitalOcean Knowledge Base (empty; add files via the generated app or DO console).
- *
- * @param {Record<string, unknown>} payload optional do_token, name, region, project_id, embedding_model_uuid, vpc_uuid
- * @returns {Promise<{ knowledge_base: { uuid: string, name: string } }>}
- */
-export async function postKnowledgeBasesCreate(payload = {}) {
-  const res = await fetch(`${apiBase()}/api/knowledge-bases/create`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(
-      typeof data.error === "string"
-        ? data.error
-        : typeof data.message === "string"
-          ? data.message
-          : `Create knowledge base failed (${res.status})`
-    );
-  }
-  const kb = data.knowledge_base;
-  if (!kb || typeof kb.uuid !== "string") {
-    throw new Error("Invalid response: missing knowledge_base.uuid");
-  }
-  return {
-    knowledge_base: {
-      uuid: kb.uuid,
-      name: typeof kb.name === "string" ? kb.name : kb.uuid,
-    },
-  };
-}
-
-/**
- * Re-run the same prompt+token+KB id against DOCR. Returns the new build_id so the UI
- * can transition to the building view. The original build object stays in memory.
- *
- * @param {string} buildId build to redeploy from
- * @returns {Promise<{ build_id: string, deploy_mode: string }>}
- */
-export async function postRedeploy(buildId) {
+export async function postApprove(buildId) {
   const res = await fetch(
-    `${apiBase()}/api/build/${encodeURIComponent(buildId)}/redeploy`,
+    `${apiBase()}/api/build/${encodeURIComponent(buildId)}/approve`,
     { method: "POST" }
   );
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(
-      typeof data.error === "string"
-        ? data.error
-        : `Redeploy failed (${res.status})`
-    );
+    throw new Error(data.error || `Approve failed (${res.status})`);
   }
-  if (!data.build_id) {
-    throw new Error("Invalid response: missing build_id");
+  return data;
+}
+
+/**
+ * Cancel a parked build before provisioning starts. Once provisioning has begun this
+ * endpoint returns 409 — the caller should treat that as "too late to cancel" and let
+ * the build continue.
+ */
+export async function postCancel(buildId) {
+  const res = await fetch(
+    `${apiBase()}/api/build/${encodeURIComponent(buildId)}/cancel`,
+    { method: "POST" }
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `Cancel failed (${res.status})`);
   }
-  return {
-    build_id: data.build_id,
-    deploy_mode: data.deploy_mode || "docr",
-  };
+  return data;
 }
 
 /**

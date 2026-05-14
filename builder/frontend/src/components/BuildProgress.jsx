@@ -1,144 +1,79 @@
-const STEPS_DOCR = [
+/**
+ * Renders the build pipeline step list during `provisioning → preview_live → deploying`.
+ * The state machine in App.jsx leaves this screen as soon as `preview_url` is set —
+ * after that the Result split-screen takes over. So this view's job is just to keep
+ * the user informed during the ~30–90s while Vite is building.
+ */
+
+const STEP_ORDER = [
   "Understanding your prompt",
   "Generating code",
+  "Awaiting your approval",
+  "Knowledge base setup",
+  "Spaces bucket setup",
   "Building static site",
+  "Live preview ready",
   "Pushing to DOCR",
   "Deploying to DigitalOcean",
-  "Going live...",
+  "Going live on DigitalOcean",
+  "Verifying public URL",
 ];
 
-const STEPS_GITHUB = [
-  "Understanding your prompt",
-  "Generating code",
-  "Creating GitHub repo",
-  "Pushing files",
-  "Deploying to DigitalOcean",
-  "Going live...",
-];
-
-const STEPS_LOCAL = [
-  "Understanding your prompt",
-  "Generating code",
-  "Building static site",
-  "Going live...",
-];
-
-function statusIcon(status) {
-  if (status === "done") {
-    return (
-      <span style={{ color: "#3ecf8e", fontSize: "1.1rem", width: 22, textAlign: "center" }} aria-hidden>
-        ✓
-      </span>
-    );
-  }
-  if (status === "failed") {
-    return (
-      <span style={{ color: "#ff6b6b", fontSize: "1.1rem", width: 22, textAlign: "center" }} aria-hidden>
-        ✕
-      </span>
-    );
-  }
-  if (status === "in_progress") {
-    return (
-      <span
-        style={{
-          width: 18,
-          height: 18,
-          border: "2px solid #444",
-          borderTopColor: "#0069ff",
-          borderRadius: "50%",
-          display: "inline-block",
-          animation: "spin 0.8s linear infinite",
-        }}
-        aria-label="In progress"
-      />
-    );
-  }
-  return (
-    <span style={{ width: 22, display: "inline-block", opacity: 0.35 }} aria-hidden>
-      ○
-    </span>
-  );
+function statusClass(status) {
+  if (status === "done") return "done";
+  if (status === "in_progress") return "in_progress";
+  if (status === "failed") return "failed";
+  return "";
 }
 
-function mergeSteps(incoming, stepOrder) {
-  const map = new Map();
-  for (const s of incoming || []) {
-    if (s && s.step) map.set(s.step, s);
-  }
-  return stepOrder.map((name) => {
-    const hit = map.get(name);
-    return {
-      step: name,
-      status: hit?.status || "pending",
-      detail: hit?.detail || "",
-    };
-  });
+function markerSymbol(status) {
+  if (status === "done") return "✓";
+  if (status === "failed") return "✕";
+  return "";
 }
 
 export default function BuildProgress({ buildState }) {
-  const mode =
-    buildState?.deploy_mode === "github"
-      ? "github"
-      : buildState?.deploy_mode === "local"
-      ? "local"
-      : "docr";
-  const stepOrder =
-    mode === "github" ? STEPS_GITHUB : mode === "local" ? STEPS_LOCAL : STEPS_DOCR;
-  const steps = mergeSteps(buildState?.steps, stepOrder);
+  const steps = buildState?.steps || [];
+  const byName = new Map(steps.map((s) => [s.step, s]));
+
+  const ordered = STEP_ORDER.map((name) => {
+    const found = byName.get(name);
+    return found || { step: name, status: "pending", detail: "" };
+  });
+  /** Include any unexpected steps the backend emitted that we didn't anticipate. */
+  for (const s of steps) {
+    if (!STEP_ORDER.includes(s.step)) ordered.push(s);
+  }
 
   return (
-    <div
-      style={{
-        maxWidth: 520,
-        margin: "0 auto",
-        padding: "2rem 1.25rem",
-      }}
-    >
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-      <h2 style={{ margin: "0 0 1rem", fontSize: "1.35rem" }}>Building…</h2>
-      <p style={{ margin: "0 0 1.5rem", opacity: 0.8, fontSize: "0.95rem" }}>
-        {mode === "github"
-          ? "Sit tight — this uses your DigitalOcean and GitHub accounts."
-          : mode === "local"
-          ? "Sit tight — generating code and serving it from this machine."
-          : "Sit tight — this uses your DigitalOcean account (Container Registry + App Platform)."}
-      </p>
-      <ul
-        style={{
-          listStyle: "none",
-          margin: 0,
-          padding: 0,
-          display: "flex",
-          flexDirection: "column",
-          gap: "1rem",
-        }}
-      >
-        {steps.map((s) => (
-          <li
-            key={s.step}
-            style={{
-              display: "flex",
-              gap: "0.75rem",
-              alignItems: "flex-start",
-              padding: "0.65rem 0.75rem",
-              borderRadius: 8,
-              background: "#111",
-              border: "1px solid #1c1c1c",
-            }}
-          >
-            <div style={{ marginTop: 2 }}>{statusIcon(s.status)}</div>
-            <div>
-              <div style={{ fontWeight: 600 }}>{s.step}</div>
-              {s.detail ? (
-                <div style={{ fontSize: "0.85rem", opacity: 0.75, marginTop: "0.2rem" }}>
-                  {s.detail}
-                </div>
-              ) : null}
-            </div>
-          </li>
-        ))}
-      </ul>
+    <div className="ta-progress">
+      <div className="ta-progress-inner">
+        <div className="ta-section-label">Deploying</div>
+        <h2 className="ta-progress-title">
+          {buildState?.app_spec?.app_name || "Your app"} is being built
+        </h2>
+        <p className="ta-progress-subtitle">
+          You'll see a live preview the moment the build finishes — DigitalOcean
+          deployment continues in the background.
+        </p>
+
+        <ul className="ta-steps">
+          {ordered.map((s) => (
+            <li
+              key={s.step}
+              className={"ta-step " + statusClass(s.status)}
+            >
+              <div className="ta-step-marker" aria-hidden>
+                {markerSymbol(s.status)}
+              </div>
+              <div className="ta-step-body">
+                <div className="ta-step-name">{s.step}</div>
+                {s.detail ? <div className="ta-step-detail">{s.detail}</div> : null}
+              </div>
+            </li>
+          ))}
+        </ul>
+      </div>
     </div>
   );
 }

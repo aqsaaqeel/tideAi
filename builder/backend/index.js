@@ -29,6 +29,14 @@ import {
   listKnowledgeBasesForToken,
   createKnowledgeBaseForToken,
 } from "./knowledgeBasesAdmin.js";
+import { buildCostEstimate } from "./pricing.js";
+import {
+  createSpacesBucket,
+  parsedRequestsSpaces,
+  tideaiAutoSpacesDisabled,
+} from "./spacesAdmin.js";
+import { createSpacesProxy } from "./spacesProxy.js";
+import { waitUntilReachable } from "./reachable.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, ".env") });
@@ -44,6 +52,7 @@ app.use(createInferenceProxy());
 app.use(createKbaasProxy());
 app.use(createGenAiProxy());
 app.use(express.json({ limit: "2mb" }));
+app.use(createSpacesProxy());
 
 /**
  * In-memory map for **local preview** deploy mode: buildId → on-disk dist/ folder.
@@ -179,7 +188,12 @@ function resolveDocrRepoName() {
 }
 
 /**
- * @param {"docr" | "github"} deploy_mode
+ * Phase 1 of the build: run codegen, compute the cost estimate, and park the
+ * pipeline at `awaiting_approval`. The `parsed` codegen output and resolved
+ * tokens are stashed on the build state so {@link resumePipelineAfterApproval}
+ * can pick up without re-running inference.
+ *
+ * @param {"docr" | "github" | "local"} deploy_mode
  * @param {string | null} githubToken
  */
 async function runBuildPipeline(
@@ -207,29 +221,17 @@ async function runBuildPipeline(
     upsertStep(buildId, "Generating code", "done", `${parsed.files.length} files`);
     log(buildId, "Step: codegen done", `${parsed.app_name}`);
 
-    /**
-     * Surface a small subset of the parsed codegen on the build state so the UI can
-     * render a cost breakdown (`do_services` decides which DigitalOcean line items
-     * apply). Keeps the SSE payload light by not including the generated files.
-     */
-    patchBuild(buildId, {
-      app_spec: {
-        app_name: typeof parsed.app_name === "string" ? parsed.app_name : "",
-        description:
-          typeof parsed.description === "string" ? parsed.description : "",
-        do_services: Array.isArray(parsed.do_services)
-          ? parsed.do_services.filter((x) => typeof x === "string")
-          : [],
-        env_vars: Array.isArray(parsed.env_vars)
-          ? parsed.env_vars
-              .filter(
-                (e) => e && typeof e === "object" && typeof e.key === "string"
-              )
-              .map((e) => ({ key: e.key, source: e.source ?? null }))
-          : [],
-      },
+    const safeAppName = typeof parsed.app_name === "string" ? parsed.app_name : "";
+    const safeDescription =
+      typeof parsed.description === "string" ? parsed.description : "";
+    const safeServices = Array.isArray(parsed.do_services)
+      ? parsed.do_services.filter((x) => typeof x === "string")
+      : [];
+    const cost_estimate = buildCostEstimate({
+      do_services: safeServices,
+      app_name: safeAppName,
+      description: safeDescription,
     });
-
     const appSlug =
       String(parsed.app_name)
         .toLowerCase()
@@ -238,6 +240,76 @@ async function runBuildPipeline(
         .replace(/^-|-$/g, "")
         .slice(0, 90) || `app-${buildId.slice(0, 8)}`;
 
+    patchBuild(buildId, {
+      status: "awaiting_approval",
+      parsed,
+      app_slug: appSlug,
+      github_token: githubToken || null,
+      app_spec: {
+        app_name: safeAppName,
+        description: safeDescription,
+        do_services: safeServices,
+        env_vars: Array.isArray(parsed.env_vars)
+          ? parsed.env_vars
+              .filter(
+                (e) => e && typeof e === "object" && typeof e.key === "string"
+              )
+              .map((e) => ({ key: e.key, source: e.source ?? null }))
+          : [],
+        cost_estimate,
+      },
+    });
+    upsertStep(
+      buildId,
+      "Awaiting your approval",
+      "in_progress",
+      "Review the blueprint and cost on the next screen."
+    );
+    log(buildId, "Step: awaiting approval");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(buildId, "Build failed (pre-approval)", message);
+    patchBuild(buildId, { status: "failed", error: message });
+    const steps = getBuild(buildId)?.steps || [];
+    const last = [...steps].reverse().find((s) => s.status === "in_progress");
+    if (last) upsertStep(buildId, last.step, "failed", message);
+    else upsertStep(buildId, "Generating code", "failed", message);
+  }
+}
+
+/**
+ * Phase 2 of the build: provision DO artifacts, build Vite, push to DOCR, and
+ * deploy on App Platform. Called only after {@link runBuildPipeline} parked
+ * the build at `awaiting_approval` and the user POSTed `/approve`.
+ */
+async function resumePipelineAfterApproval(buildId) {
+  const state = getBuild(buildId);
+  if (!state) {
+    log(buildId, "Resume: build not found");
+    return;
+  }
+  const parsed = state.parsed;
+  if (!parsed) {
+    log(buildId, "Resume: no parsed spec stashed");
+    patchBuild(buildId, {
+      status: "failed",
+      error: "Internal: no parsed spec on this build.",
+    });
+    return;
+  }
+  const doToken = String(state.do_token || "");
+  const deploy_mode = state.deploy_mode === "github" || state.deploy_mode === "local"
+    ? state.deploy_mode
+    : "docr";
+  const githubToken = state.github_token || null;
+  const knowledgeBaseId = String(state.knowledge_base_id || "").trim();
+  const appSlug = String(state.app_slug || `app-${buildId.slice(0, 8)}`);
+
+  /** Awaiting-approval step → done. */
+  upsertStep(buildId, "Awaiting your approval", "done", "Approved — provisioning");
+  patchBuild(buildId, { status: "provisioning" });
+
+  try {
     let kbForBuild = String(knowledgeBaseId || "").trim();
     if (
       !kbForBuild &&
@@ -266,11 +338,63 @@ async function runBuildPipeline(
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         log(buildId, "Auto-provision Knowledge Base failed", msg);
+        /**
+         * Surface the *actual* DO error in the build step (truncated) so the
+         * user can see why KB creation failed instead of a generic message.
+         * Without a KB, Tier B InfoBot apps can't register data sources, so
+         * uploads hang at the registration step — knowing the cause matters.
+         */
         upsertStep(
           buildId,
           "Knowledge base setup",
+          "failed",
+          `Could not auto-create: ${msg.slice(0, 200)}`
+        );
+      }
+    }
+
+    /**
+     * Auto-provision a DigitalOcean Spaces bucket when codegen asks for it
+     * (Tier B InfoBot stores raw PDFs in Spaces, then registers them with the KB).
+     * Bucket name is derived from the app slug + the first 6 chars of the build id.
+     */
+    let spacesForBuild = { bucket: "", region: "" };
+    if (
+      !tideaiAutoSpacesDisabled() &&
+      parsedRequestsSpaces(parsed) &&
+      process.env.DO_SPACES_KEY &&
+      process.env.DO_SPACES_SECRET
+    ) {
+      try {
+        upsertStep(
+          buildId,
+          "Spaces bucket setup",
+          "in_progress",
+          "Creating a DigitalOcean Spaces bucket…"
+        );
+        const bucketName = `${appSlug.slice(0, 40)}-${buildId.slice(0, 6)}`
+          .toLowerCase()
+          .replace(/[^a-z0-9-]/g, "-")
+          .replace(/-+/g, "-")
+          .replace(/^-|-$/g, "")
+          .slice(0, 63);
+        const sp = await createSpacesBucket({ name: bucketName });
+        spacesForBuild = { bucket: sp.bucket, region: sp.region };
+        upsertStep(
+          buildId,
+          "Spaces bucket setup",
           "done",
-          "Could not auto-create; build continues — link a KB in Advanced if you need one."
+          sp.alreadyExists ? `Reusing ${sp.bucket}` : `Ready (${sp.bucket})`
+        );
+        log(buildId, "Auto-provisioned Spaces bucket", sp.bucket);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log(buildId, "Auto-provision Spaces failed", msg);
+        upsertStep(
+          buildId,
+          "Spaces bucket setup",
+          "done",
+          "Could not auto-create; the generated app will fall back to KB-direct uploads."
         );
       }
     }
@@ -342,6 +466,9 @@ async function runBuildPipeline(
         VITE_KBAAS_PROXY: "/api/kbaas",
         VITE_GEN_AI_PROXY: "/api/gen-ai",
         VITE_DO_KNOWLEDGE_BASE_ID: kbForBuild,
+        VITE_DO_SPACES_BUCKET: spacesForBuild.bucket,
+        VITE_DO_SPACES_REGION: spacesForBuild.region,
+        VITE_DO_SPACES_PRESIGN_URL: spacesForBuild.bucket ? "/api/spaces/presign-put" : "",
         NODE_ENV: "production",
       };
       /** Vite's `--base` so generated `index.html` references assets at `/preview/<buildId>/assets/...`. */
@@ -359,90 +486,177 @@ async function runBuildPipeline(
       return;
     }
 
-    /* DOCR path — no GitHub */
+    /**
+     * Hybrid DOCR path: surface a local preview as soon as the Vite build finishes,
+     * then continue pushing to DOCR + App Platform in the background. The SSE keeps
+     * streaming so the frontend can swap the iframe from `preview_url` to `live_do_url`
+     * when the public DigitalOcean URL is ready.
+     *
+     * We deliberately do not `rm(workRoot)` here — the local preview serves files
+     * directly from that directory. Cleanup happens via `POST /api/preview/:id/stop`
+     * or when the process exits.
+     */
     const workRoot = path.join(tmpdir(), "tideai-build", buildId);
     await mkdir(workRoot, { recursive: true });
-    try {
-      patchBuild(buildId, { status: "publishing" });
-      upsertStep(buildId, "Building static site", "in_progress", "npm install && npm run build…");
-      log(buildId, "Step: Vite build in temp dir");
 
-      const buildEnv = {
-        ...process.env,
-        VITE_DO_TOKEN: doToken,
-        VITE_INFERENCE_PROXY: "/api/inference",
-        VITE_KBAAS_PROXY: "/api/kbaas",
-        VITE_GEN_AI_PROXY: "/api/gen-ai",
-        VITE_DO_KNOWLEDGE_BASE_ID: kbForBuild,
-        NODE_ENV: "production",
-      };
-      const distDir = await buildViteProject(parsed.files, buildEnv, workRoot);
-      upsertStep(buildId, "Building static site", "done", "dist/ ready");
-      log(buildId, "Step: Vite build done");
+    upsertStep(buildId, "Building static site", "in_progress", "npm install && npm run build…");
+    log(buildId, "Step: Vite build in temp dir");
 
-      upsertStep(buildId, "Pushing to DOCR", "in_progress", "Uploading image to Container Registry…");
-      log(buildId, "Step: DOCR push started");
+    const buildEnv = {
+      ...process.env,
+      VITE_DO_TOKEN: doToken,
+      VITE_INFERENCE_PROXY: "/api/inference",
+      VITE_KBAAS_PROXY: "/api/kbaas",
+      VITE_GEN_AI_PROXY: "/api/gen-ai",
+      VITE_DO_KNOWLEDGE_BASE_ID: kbForBuild,
+      VITE_DO_SPACES_BUCKET: spacesForBuild.bucket,
+      VITE_DO_SPACES_REGION: spacesForBuild.region,
+      /**
+       * Intentionally empty for DOCR deploys. The Caddyfile in the image only
+       * reverse-proxies /api/inference, /api/kbaas, /api/gen-ai — there is no
+       * `/api/spaces/presign-put` endpoint at the public App Platform origin.
+       * Per the system prompt, when this is empty the generated app falls back
+       * to Gen-AI's built-in presigned upload (which DOES proxy through). The
+       * Spaces bucket is still provisioned for cost transparency / DO console
+       * visibility, just not written to by the deployed app for V1.
+       */
+      VITE_DO_SPACES_PRESIGN_URL: "",
+      NODE_ENV: "production",
+    };
+    /**
+     * `dist/` is packaged directly into the DOCR image and served by Caddy from `/`.
+     * Build with the default `--base=/` so asset URLs in index.html resolve at the
+     * public App Platform URL. The previous design built with `--base=/preview/<id>/`
+     * for a local preview, but the same dist then got pushed to DOCR with broken
+     * asset paths (assets resolved to /preview/<id>/assets/... on the live URL → 404
+     * → blank page).
+     */
+    const distDir = await buildViteProject(parsed.files, buildEnv, workRoot);
+    upsertStep(buildId, "Building static site", "done", "dist/ ready");
+    log(buildId, "Step: Vite build done");
 
-      const docrToken = resolveDocrToken(doToken);
-      const registryName = await getRegistryNameOrThrow(docrToken);
-      const desiredRepo = resolveDocrRepoName();
-      const repoName = await pickDocrRepositorySlug({
-        doToken: docrToken,
-        registryName,
-        desiredSlug: desiredRepo,
-        log: (m) => log(buildId, "docr", m),
-      });
-      const imageTag = `b-${buildId.replace(/-/g, "")}`;
+    /**
+     * Fire-and-forget the public DigitalOcean deploy. We return from the awaited body
+     * once the preview is live; the SSE keeps streaming on a 1 s timer so the new
+     * status fields propagate when the IIFE below resolves or rejects.
+     */
+    (async () => {
+      try {
+        upsertStep(buildId, "Pushing to DOCR", "in_progress", "Uploading image to Container Registry…");
+        log(buildId, "Step: DOCR push started");
 
-      const push = await pushBusyboxStaticImage({
-        doToken: docrToken,
-        registryName,
-        repoName,
-        tag: imageTag,
-        distDir,
-        log: (m) => log(buildId, "docr", m),
-      });
+        const docrToken = resolveDocrToken(doToken);
+        const registryName = await getRegistryNameOrThrow(docrToken);
+        const desiredRepo = resolveDocrRepoName();
+        const repoName = await pickDocrRepositorySlug({
+          doToken: docrToken,
+          registryName,
+          desiredSlug: desiredRepo,
+          log: (m) => log(buildId, "docr", m),
+        });
+        const imageTag = `b-${buildId.replace(/-/g, "")}`;
 
-      upsertStep(buildId, "Pushing to DOCR", "done", `${push.repository}:${push.tag}`);
-      patchBuild(buildId, { repo: push.registryConsoleUrl });
-      log(buildId, "Step: DOCR push done", `${push.repository}:${push.tag}`);
+        const push = await pushBusyboxStaticImage({
+          doToken: docrToken,
+          registryName,
+          repoName,
+          tag: imageTag,
+          distDir,
+          log: (m) => log(buildId, "docr", m),
+        });
 
-      const specName = `${appSlug.slice(0, 22)}-${buildId.slice(0, 6)}`
-        .toLowerCase()
-        .replace(/[^a-z0-9-]/g, "-")
-        .replace(/-+/g, "-")
-        .replace(/^-|-$/g, "")
-        .slice(0, 32);
+        upsertStep(buildId, "Pushing to DOCR", "done", `${push.repository}:${push.tag}`);
+        patchBuild(buildId, { repo: push.registryConsoleUrl });
+        log(buildId, "Step: DOCR push done", `${push.repository}:${push.tag}`);
 
-      patchBuild(buildId, { status: "deploying" });
-      upsertStep(buildId, "Deploying to DigitalOcean", "in_progress", "Creating App Platform app…");
-      log(buildId, "Step: DO createApp (DOCR image)");
+        const specName = `${appSlug.slice(0, 22)}-${buildId.slice(0, 6)}`
+          .toLowerCase()
+          .replace(/[^a-z0-9-]/g, "-")
+          .replace(/-+/g, "-")
+          .replace(/^-|-$/g, "")
+          .slice(0, 32);
 
-      const appId = await createAppFromDocrImage({
-        doToken,
-        specName,
-        repository: push.repository,
-        tag: push.tag,
-        manifestDigest: push.manifestDigest,
-        log: (m) => log(buildId, "deploy", m),
-      });
-      upsertStep(buildId, "Deploying to DigitalOcean", "done", `App ID ${appId}`);
-      log(buildId, "Step: DO app created", appId);
+        patchBuild(buildId, { status: "deploying" });
+        upsertStep(buildId, "Deploying to DigitalOcean", "in_progress", "Creating App Platform app…");
+        log(buildId, "Step: DO createApp (DOCR image)");
 
-      upsertStep(buildId, "Going live...", "in_progress", "Waiting for deployment…");
-      log(buildId, "Step: polling until live");
+        const appId = await createAppFromDocrImage({
+          doToken,
+          specName,
+          repository: push.repository,
+          tag: push.tag,
+          manifestDigest: push.manifestDigest,
+          log: (m) => log(buildId, "deploy", m),
+        });
+        upsertStep(buildId, "Deploying to DigitalOcean", "done", `App ID ${appId}`);
+        log(buildId, "Step: DO app created", appId);
 
-      const url = await pollUntilLive(doToken, appId, (phase) => {
-        upsertStep(buildId, "Going live...", "in_progress", `Phase: ${phase}`);
-        log(buildId, "DO deployment phase", phase);
-      });
+        upsertStep(buildId, "Going live on DigitalOcean", "in_progress", "Waiting for deployment…");
+        log(buildId, "Step: polling until live");
 
-      upsertStep(buildId, "Going live...", "done", url);
-      patchBuild(buildId, { status: "live", url });
-      log(buildId, "Build complete", url);
-    } finally {
-      await rm(workRoot, { recursive: true, force: true }).catch(() => {});
-    }
+        const live_do_url = await pollUntilLive(doToken, appId, (phase) => {
+          upsertStep(buildId, "Going live on DigitalOcean", "in_progress", `Phase: ${phase}`);
+          log(buildId, "DO deployment phase", phase);
+        });
+
+        upsertStep(buildId, "Going live on DigitalOcean", "done", live_do_url);
+
+        /**
+         * After App Platform reports ACTIVE we still need to make sure the
+         * public DNS record is propagated AND the URL serves a real response.
+         * Without this, the user's local resolver can cache NXDOMAIN if the
+         * iframe queries during the propagation window — leading to a 5-minute
+         * "page not reachable" until the negative cache expires. See
+         * reachable.js for details.
+         */
+        upsertStep(buildId, "Verifying public URL", "in_progress", "Waiting for DNS to propagate…");
+        log(buildId, "Step: verifying public URL");
+        const reach = await waitUntilReachable(live_do_url, {
+          timeoutMs: 120_000,
+          onProgress: (msg) => {
+            upsertStep(buildId, "Verifying public URL", "in_progress", msg);
+          },
+        });
+        if (reach.ok) {
+          upsertStep(buildId, "Verifying public URL", "done", "Reachable");
+          log(buildId, "URL reachable");
+        } else {
+          /**
+           * Don't fail the build if verification times out — the URL may still
+           * come up in another minute. Surface a soft warning and let the
+           * frontend's iframe retry pattern handle it.
+           */
+          upsertStep(
+            buildId,
+            "Verifying public URL",
+            "done",
+            `Marking live anyway — last DNS check: ${reach.error}`
+          );
+          log(buildId, "URL verification timed out", reach.error);
+        }
+
+        patchBuild(buildId, { status: "live", url: live_do_url, live_do_url });
+        log(buildId, "Build complete", live_do_url);
+      } catch (e) {
+        /**
+         * Surface the *cause* of a Node fetch failure (TypeError "fetch failed"
+         * hides the actual ECONNRESET / DNS / TLS reason inside `e.cause`).
+         * Without this we lose all signal on why DOCR / App Platform broke.
+         */
+        const baseMsg = e instanceof Error ? e.message : String(e);
+        const cause = e?.cause;
+        const causeMsg = cause
+          ? `${cause.code || cause.name || ""} ${cause.message || cause}`.trim()
+          : "";
+        const msg = causeMsg ? `${baseMsg} — cause: ${causeMsg}` : baseMsg;
+        log(buildId, "DigitalOcean deploy failed (preview still up)", msg);
+        if (e instanceof Error && e.stack) log(buildId, "stack", e.stack.split("\n").slice(0, 6).join("\n"));
+        const steps = getBuild(buildId)?.steps || [];
+        const last = [...steps].reverse().find((s) => s.status === "in_progress");
+        if (last) upsertStep(buildId, last.step, "failed", msg);
+        patchBuild(buildId, { status: "preview_only", do_deploy_error: msg });
+      }
+    })();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(buildId, "Build failed", message);
@@ -623,7 +837,7 @@ app.post("/api/build", (req, res) => {
   if (!do_token) {
     return res.status(400).json({
       error:
-        "do_token is required (paste in the form) unless the server sets TIDEAI_DEFAULT_DO_TOKEN for local testing. Inference (codegen) needs it even in local preview mode.",
+        "Set TIDEAI_DEFAULT_DO_TOKEN in the tideAI backend .env. Inference (codegen) needs a DigitalOcean PAT.",
     });
   }
   if (deploy_mode === "github" && !githubToken) {
@@ -716,6 +930,48 @@ app.post("/api/build/:buildId/redeploy", (req, res) => {
   res.json({ build_id: newId, deploy_mode: targetMode });
 });
 
+/**
+ * Approve a parked build (status `awaiting_approval`) and kick off provisioning + deploy.
+ * Idempotent in the failure sense: a second call once provisioning has started returns 409.
+ */
+app.post("/api/build/:buildId/approve", (req, res) => {
+  const { buildId } = req.params;
+  const b = getBuild(buildId);
+  if (!b) return res.status(404).json({ error: "Unknown build_id" });
+  if (b.status !== "awaiting_approval") {
+    return res.status(409).json({
+      error: `Build is not awaiting approval (current status: ${b.status}).`,
+    });
+  }
+  setImmediate(() => {
+    resumePipelineAfterApproval(buildId);
+  });
+  res.json({ status: "provisioning" });
+});
+
+/**
+ * Cancel a parked build. Idempotent — calling on an already-cancelled build returns the
+ * same `{ status: "cancelled" }` shape. Cannot cancel a build that has already started
+ * provisioning (status `provisioning` or later); returns 409 instead.
+ */
+app.post("/api/build/:buildId/cancel", (req, res) => {
+  const { buildId } = req.params;
+  const b = getBuild(buildId);
+  if (!b) return res.status(404).json({ error: "Unknown build_id" });
+  if (b.status === "cancelled") {
+    return res.json({ status: "cancelled" });
+  }
+  if (b.status !== "awaiting_approval" && b.status !== "inferring" && b.status !== "generating") {
+    return res.status(409).json({
+      error: `Build is past the cancellable phase (current status: ${b.status}).`,
+    });
+  }
+  patchBuild(buildId, { status: "cancelled", error: null });
+  upsertStep(buildId, "Awaiting your approval", "done", "Cancelled");
+  log(buildId, "Build cancelled");
+  res.json({ status: "cancelled" });
+});
+
 app.get("/api/build/:buildId", (req, res) => {
   const { buildId } = req.params;
   const build = getBuild(buildId);
@@ -746,9 +1002,17 @@ app.get("/api/build/:buildId", (req, res) => {
       error: b.error,
       deploy_mode: b.deploy_mode ?? "docr",
       app_spec: b.app_spec ?? null,
+      preview_url: b.preview_url ?? null,
+      live_do_url: b.live_do_url ?? null,
+      do_deploy_error: b.do_deploy_error ?? null,
     };
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
-    if (b.status === "live" || b.status === "failed") {
+    if (
+      b.status === "live" ||
+      b.status === "failed" ||
+      b.status === "cancelled" ||
+      b.status === "preview_only"
+    ) {
       if (timer) clearInterval(timer);
       res.end();
     }

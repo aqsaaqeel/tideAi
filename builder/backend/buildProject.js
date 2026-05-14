@@ -47,8 +47,25 @@ function projectHasSourceFile(written, posixPath) {
 }
 
 /**
- * Codegen sometimes adds `import … from './utils'` without a `src/utils.js` file.
- * Emit a minimal stub so `vite build` succeeds (preview may need a rebuild for real logic).
+ * Canonical fallback implementations for helpers the system prompt names verbatim.
+ * If the LLM imports one of these from `./utils` but doesn't actually export it,
+ * we inject a working version so the build still succeeds.
+ */
+const CANONICAL_UTILS_FALLBACKS = {
+  tideaiStripTrailingSlash: `export function tideaiStripTrailingSlash(s) {
+  let t = s == null ? "" : String(s);
+  while (t.endsWith("/")) t = t.slice(0, -1);
+  return t;
+}`,
+};
+
+/**
+ * Codegen sometimes adds `import … from './utils'` without a `src/utils.js` file,
+ * OR emits a `src/utils.js` that's missing some of the exports it then imports.
+ * This function makes both cases buildable:
+ *   - Missing file → write a stub with all imported names as no-op exports.
+ *   - Existing file missing exports → append fallback exports (using canonical
+ *     bodies when we recognize the name from the system prompt).
  *
  * @param {string} workRoot
  * @param {{ path: string, content: string }[]} files
@@ -75,10 +92,10 @@ async function tideaiStubMissingRelativeUtils(workRoot, files) {
       );
       const base = path.posix.basename(resolved).replace(/\.(jsx?|tsx?)$/, "");
       if (base !== "utils") return;
-      if (projectHasSourceFile(written, resolved)) return;
       const canonical = path.posix.join(path.posix.dirname(resolved), "utils");
+      const fileExists = projectHasSourceFile(written, resolved);
       if (!stubs.has(canonical))
-        stubs.set(canonical, { names: new Set(), hasDefault: false });
+        stubs.set(canonical, { names: new Set(), hasDefault: false, fileExists });
       const e = stubs.get(canonical);
       for (const n of names) e.names.add(n);
       if (hasDefault) e.hasDefault = true;
@@ -108,20 +125,48 @@ async function tideaiStubMissingRelativeUtils(workRoot, files) {
     }
   }
 
-  for (const [canonical, { names, hasDefault }] of stubs) {
+  function bodyFor(name) {
+    return CANONICAL_UTILS_FALLBACKS[name] || `export function ${name}() { return undefined; }`;
+  }
+
+  for (const [canonical, { names, hasDefault, fileExists }] of stubs) {
     const segments = canonical.split("/");
-    const outPath = path.join(workRoot, ...segments) + ".js";
-    try {
-      await fs.access(outPath);
+    const outPathBase = path.join(workRoot, ...segments);
+
+    if (fileExists) {
+      /**
+       * Patch existing user-emitted utils file: append fallback exports for any
+       * imported names that the file doesn't already export. Detection is a
+       * pragmatic regex (top-level `export function|const|let|var <name>` /
+       * `export { <name> }`), not a full parser.
+       */
+      const candidates = [outPathBase + ".js", outPathBase + ".jsx", outPathBase + ".ts", outPathBase + ".tsx"];
+      let actualPath = null;
+      let existing = "";
+      for (const c of candidates) {
+        try {
+          existing = await fs.readFile(c, "utf8");
+          actualPath = c;
+          break;
+        } catch { /* not this one */ }
+      }
+      if (!actualPath) continue;
+      const exportPattern = (n) =>
+        new RegExp(`export\\s+(?:function|class|const|let|var)\\s+${n}\\b|export\\s*\\{[^}]*\\b${n}\\b[^}]*\\}`);
+      const missing = [...names].filter((n) => !exportPattern(n).test(existing));
+      if (missing.length === 0) continue;
+      const addition =
+        "\n\n/* tideAI: appended fallback exports — these names were imported but not exported by the generated file. */\n" +
+        missing.map(bodyFor).join("\n\n") + "\n";
+      await fs.writeFile(actualPath, existing + addition, "utf8");
       continue;
-    } catch {
-      /* create */
     }
+
+    const outPath = outPathBase + ".js";
     let body =
       "/* tideAI: stub — an import pointed at ./utils but that file was missing from generated files. */\n";
     if (hasDefault) body += "const _tideaiDefault = {};\nexport default _tideaiDefault;\n";
-    for (const n of names)
-      body += `export function ${n}() { return undefined; }\n`;
+    for (const n of names) body += bodyFor(n) + "\n";
     if (!hasDefault && names.size === 0) body += "export {};\n";
     await fs.mkdir(path.dirname(outPath), { recursive: true });
     await fs.writeFile(outPath, body, "utf8");

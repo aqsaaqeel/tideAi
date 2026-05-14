@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tideai-backend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "builder/backend", "run", "dev"],
+      "port": 3001
+    },
+    {
+      "name": "tideai-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "builder/frontend", "run", "dev", "--", "--port", "5273", "--strictPort"],
+      "port": 5273
+    }
+  ]
+}
