@@ -4,9 +4,68 @@ import path from "path";
 import { createHash, randomBytes } from "crypto";
 import { execFileSync } from "child_process";
 import { gzipSync } from "zlib";
+import https from "https";
 
 const DO_API = "https://api.digitalocean.com/v2";
 const REGISTRY_HOST = "registry.digitalocean.com";
+
+/**
+ * Fetch-shaped wrapper around Node's `https` module. Forces HTTP/1.1 so
+ * registry.digitalocean.com doesn't reject our rapid back-to-back blob/manifest
+ * uploads with NGHTTP2_ENHANCE_YOUR_CALM. Native `fetch` (undici) negotiates
+ * HTTP/2 by default and gets throttled on the same single multiplexed stream.
+ * App Platform and the regular DO API still use Node's default fetch.
+ *
+ * @param {string} url
+ * @param {{ method?: string, headers?: Record<string,string>|Headers, body?: Buffer|string }} [init]
+ * @returns {Promise<Response>}
+ */
+function regHttp(url, init = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const headers = {};
+    if (init.headers) {
+      if (init.headers instanceof Headers) {
+        for (const [k, v] of init.headers.entries()) headers[k] = v;
+      } else {
+        Object.assign(headers, init.headers);
+      }
+    }
+    const body = init.body == null ? null : (Buffer.isBuffer(init.body) ? init.body : Buffer.from(init.body));
+    if (body && !headers["Content-Length"] && !headers["content-length"]) {
+      headers["Content-Length"] = String(body.length);
+    }
+    const req = https.request({
+      hostname: u.hostname,
+      port: u.port || 443,
+      path: u.pathname + u.search,
+      method: init.method || "GET",
+      headers,
+      /** Force HTTP/1.1 — Node's https module is HTTP/1.x only by default. */
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        const buf = Buffer.concat(chunks);
+        /** Build a fetch-compatible Response so callers can keep using `.text()` / `.headers.get()` / `.status`. */
+        const responseHeaders = new Headers();
+        for (const [k, v] of Object.entries(res.headers)) {
+          if (Array.isArray(v)) v.forEach((vv) => responseHeaders.append(k, vv));
+          else if (v != null) responseHeaders.set(k, String(v));
+        }
+        resolve(new Response(buf, {
+          status: res.statusCode || 0,
+          statusText: res.statusMessage || "",
+          headers: responseHeaders,
+        }));
+      });
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
 const CADDY_TGZ_URL =
   process.env.TIDEAI_CADDY_URL ||
   "https://github.com/caddyserver/caddy/releases/download/v2.8.4/caddy_2.8.4_linux_amd64.tar.gz";
@@ -376,7 +435,7 @@ async function fetchRegistryBearerToken(
   diag?.note(`Challenge realm=${ch.realm} service=${ch.service} scope=${ch.scope}`);
 
   async function tryAuth(tokenUrlStr, authz, label) {
-    const res = await fetch(tokenUrlStr, {
+    const res = await regHttp(tokenUrlStr, {
       headers: {
         Authorization: authz,
         Accept: "application/json",
@@ -479,7 +538,7 @@ async function discoverRegistryBearerChallenge(repositoryPath, diag) {
     {
       label: "HEAD /manifests/<probe>",
       run: () =>
-        fetch(`${base}/manifests/tideai-probe-${Date.now()}`, {
+        regHttp(`${base}/manifests/tideai-probe-${Date.now()}`, {
           method: "HEAD",
           headers: REGISTRY_V2_HEADERS,
         }),
@@ -487,7 +546,7 @@ async function discoverRegistryBearerChallenge(repositoryPath, diag) {
     {
       label: "POST /blobs/uploads/",
       run: () =>
-        fetch(`${base}/blobs/uploads/`, {
+        regHttp(`${base}/blobs/uploads/`, {
           method: "POST",
           headers: { ...REGISTRY_V2_HEADERS, "Content-Length": "0" },
         }),
@@ -581,7 +640,7 @@ async function regFetchBasicThenBearer(url, init, basicAuthB64, apiPat, diag) {
   }
   headers.set("Authorization", basicAuthHeader(basicAuthB64));
 
-  const first = await fetch(url, { ...init, headers });
+  const first = await regHttp(url, { ...init, headers });
   if (first.status !== 401) return first;
 
   const www =
@@ -606,7 +665,7 @@ async function regFetchBasicThenBearer(url, init, basicAuthB64, apiPat, diag) {
     h2.set("Docker-Distribution-API-Version", "registry/2.0");
   }
   h2.set("Authorization", `Bearer ${bearer}`);
-  return fetch(url, { ...init, headers: h2 });
+  return regHttp(url, { ...init, headers: h2 });
 }
 
 /**
@@ -703,7 +762,7 @@ export async function pushBusyboxStaticImage(opts) {
         h.set("Docker-Distribution-API-Version", "registry/2.0");
       }
       h.set("Authorization", `Bearer ${b}`);
-      return fetch(url, { ...init, headers: h });
+      return regHttp(url, { ...init, headers: h });
     };
     if (registryBearer) {
       let r = await runBearer(registryBearer);
