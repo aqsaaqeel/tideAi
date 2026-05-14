@@ -101,7 +101,16 @@ function resolveBuildTimeEnvs(parsed, doToken, githubToken, opts = {}) {
     else if (typeof e.value === "string") value = e.value;
     out.push({ key: e.key, value });
   }
-  if (!out.some((x) => x.key === "VITE_DO_TOKEN")) {
+  /**
+   * Tier 0 (static / no-AI: portfolios, landing pages, etc.) sets
+   * `do_services: []` and an empty `env_vars` per the system prompt — those
+   * apps don't need the DigitalOcean token at build time. Only auto-inject
+   * VITE_DO_TOKEN as a safety net for AI tiers (do_services non-empty), where
+   * the LLM occasionally forgets to declare it.
+   */
+  const services = Array.isArray(parsed.do_services) ? parsed.do_services : [];
+  const tierUsesDoApi = services.some((s) => typeof s === "string" && s.trim());
+  if (tierUsesDoApi && !out.some((x) => x.key === "VITE_DO_TOKEN")) {
     out.push({ key: "VITE_DO_TOKEN", value: doToken });
   }
   const kb = String(opts.knowledgeBaseId || "").trim();

@@ -106,6 +106,20 @@ function servicesIncludeSpaces(services) {
 }
 
 /**
+ * Tier 0 (static / no-AI sites) emit `do_services: []` per the system prompt.
+ * Without this guard the Cost summary always showed a "Serverless Inference — chat"
+ * line, even on a portfolio site that never calls the inference API.
+ *
+ * @param {string[]} services
+ * @returns {boolean}
+ */
+function servicesIncludeInference(services) {
+  return services.some(
+    (s) => s.includes("inference") || s.includes("serverless")
+  );
+}
+
+/**
  * Heuristic match for "this app generates images" so we add the image-inference line.
  * @param {string} appName
  * @param {string} description
@@ -133,11 +147,14 @@ export function buildCostEstimate(spec = {}) {
     ? spec.do_services.map((s) => String(s).toLowerCase())
     : [];
 
+  const usesInference = servicesIncludeInference(services);
   const usesKb = servicesIncludeKb(services);
   const usesSpaces = servicesIncludeSpaces(services);
-  const usesImage = looksLikeImageApp(spec.app_name || "", spec.description || "");
+  const usesImage =
+    usesInference && looksLikeImageApp(spec.app_name || "", spec.description || "");
 
-  const lines = [COST_LINES.inference_chat];
+  const lines = [];
+  if (usesInference) lines.push(COST_LINES.inference_chat);
   if (usesImage) lines.push(COST_LINES.inference_image);
   if (usesKb) lines.push(COST_LINES.knowledge_base);
   if (usesSpaces) lines.push(COST_LINES.spaces);
