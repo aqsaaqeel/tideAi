@@ -46,6 +46,22 @@ Rules:
   Pure App Platform **static site** deploys from GitHub have **no** proxy — leave VITE_INFERENCE_PROXY unset so INFERENCE_ROOT falls back to https://inference.do-ai.run (browser CORS may still block; prefer DOCR/local for inference-heavy apps).
 - For image generation prefer catalog model **fal-ai/fast-sdxl** (async-invoke + poll as above) unless the user names another supported model
 - For text/chat use model id **llama3.3-70b-instruct** with /chat/completions
+- **TIER 0 — Static / No-AI site (evaluate FIRST, before Tier A or Tier B).** Choose this when the user wants a **content / layout** page that does not need any AI capability at runtime.
+  - **Triggers (any of these prompts → Tier 0):** "portfolio", "personal site", "personal website", "resume site", "about me page", "landing page", "marketing site", "company website", "agency site", "wedding site", "event page", "coming-soon page", "splash page", "link in bio", "menu page", "pricing page", "static blog", "single-page brochure", "showcase", or any prompt that just describes **sections, copy, offerings, and prices** without referring to chat, generation, image creation, embeddings, Q&A over docs, knowledge bases, or other inference. If the user's prompt names a real person ("Build a portfolio for Aanya Sharma"), use that exact name throughout.
+  - **Spec shape (must match exactly):** \`do_services\` MUST be \`[]\`. \`env_vars\` MUST be \`[]\` — **omit \`VITE_DO_TOKEN\`** entirely (the deployed app needs no DigitalOcean API token). The \`.do/app.yaml\` \`envs\` block MUST be omitted (no \`envs:\` key under the static site).
+  - **Code purity (forbidden in Tier 0):** **Never** read \`import.meta.env.VITE_DO_TOKEN\`, \`VITE_INFERENCE_PROXY\`, \`VITE_KBAAS_PROXY\`, \`VITE_GEN_AI_PROXY\`, \`VITE_DO_KNOWLEDGE_BASE_ID\`, or any \`VITE_DO_SPACES_*\`. **Never** define \`tideaiStripTrailingSlash\`, \`INFERENCE_API\`, \`GEN_AI_API\`, \`KBAAS_ROOT\`, or call \`/v1/chat/completions\`, \`/async-invoke\`, kbaas retrieve, or Gen-AI endpoints. **Never** include user-visible references to "Knowledge Base", "Indexing", "VITE_*", or "tideAI".
+  - **UI / UX for Tier 0 — REQUIRED. The single-card workflow layout used by Tier A/B is FORBIDDEN here.** A centered \`max-w-2xl\` card with a stack of inputs is a workflow-app pattern; it makes a portfolio look like a stub. Build a real **multi-section page** instead:
+    - **Page wrapper:** \`min-h-screen\`. Pick **one** coherent theme: light (\`bg-white text-slate-900\`) or dark (\`bg-slate-950 text-slate-100\`). Set a meaningful page \`<title>\` in \`index.html\` (e.g. the person's name + " — Portfolio").
+    - **Sticky top nav:** \`sticky top-0 z-30 backdrop-blur bg-white/80 border-b border-slate-200/60\` (light) or \`bg-slate-950/70 border-b border-slate-800\` (dark). Brand/name on the left, in-page anchor links (About, Services / Offerings, Pricing, Contact) on the right, primary CTA button (e.g. "Get in touch") aligned right.
+    - **Hero section (full-bleed, no card):** large display headline \`text-4xl sm:text-6xl font-bold tracking-tight leading-[1.05]\`, supporting subhead \`text-lg sm:text-xl text-slate-600 max-w-2xl\` (or \`text-slate-300\` on dark), primary + secondary CTA buttons side by side, optional avatar / portrait image on the right (\`rounded-2xl shadow-xl aspect-square object-cover\` or \`rounded-full ring-4 ring-white/10\`). Background uses a tasteful **gradient** (light: \`bg-gradient-to-br from-slate-50 via-white to-blue-50\`; dark: \`bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950\`) — not a flat color. **No** form/textarea/button card on the hero.
+    - **About section:** short bio paragraph + a 3-card stat strip (\`grid grid-cols-1 sm:grid-cols-3 gap-4\`) with concrete numbers ("10+ years", "50+ projects shipped", "100% remote", etc.).
+    - **Offerings / services section:** \`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6\`; each card \`rounded-2xl border border-slate-200 bg-white p-6 shadow-sm hover:shadow-md transition\` (or dark equivalents) with a small icon (emoji or inline \`<svg>\`), title, 1-line description, and a 3-bullet feature list.
+    - **Pricing section:** \`grid grid-cols-1 md:grid-cols-3 gap-6 items-stretch\`. Each tier card has tier name (\`text-sm uppercase tracking-wide text-slate-500\`), price (\`text-4xl font-bold\` + small \`/mo\` or \`/project\`), short description, ✓ feature list, and a CTA button. Mark the **middle tier** as "Most popular" with a contrasting border (\`ring-2 ring-blue-500\`) and a small badge.
+    - **Testimonials / social proof** (when relevant): 2–3 quote cards with name + role.
+    - **Contact / CTA section:** centered banner with headline, subhead, an email link or \`mailto:\` button, and an optional simple \`<form>\` (name / email / message) whose submit handler just opens \`mailto:\` — no backend, no fetch.
+    - **Footer:** small print, social links (text or icons), copyright.
+    - **Section spacing:** every \`<section>\` uses \`py-16 sm:py-24\` and \`max-w-6xl mx-auto px-4 sm:px-6 lg:px-8\`. Vary section backgrounds slightly (alternate \`bg-white\` and \`bg-slate-50\`, or \`bg-slate-950\` and \`bg-slate-900\`) so the page feels structured.
+    - **Personalization (mandatory):** populate offerings, prices, names, and testimonials with **plausible, specific** content tailored to the user's prompt — never lorem ipsum, never "Service 1 / Service 2 / Service 3". Pick reasonable real-world numbers (\`$1,200 / project\`, \`$95 / hr\`, \`Starting at $4,500\`). If the user named a person, use that exact name in the hero, the page \`<title>\`, and the contact section.
 - **Default for generic document apps:** Prompts like **"document Q&A"**, **"Doc Q&A"**, **"doc chatbot"**, **"chat with my file or notes"**, **"upload a document and ask questions"** — when the user does **not** explicitly name **DigitalOcean Knowledge Base**, **indexing on DigitalOcean**, **kbaas**, or **DO-hosted** vector search → choose **Tier A** (browser-only). That avoids empty cloud KB IDs and matches user expectations for simple prototypes.
 - **Document / notes Q&A — wizard UX (Tier A required; Tier B use the same two-step pattern):**
   - **Step 1 only:** Show **only** document capture: large textarea for paste and/or **.txt** upload, short helper text, primary button **"Use this document"** or **"Continue"** — disabled until there is non-empty text; on success set state (e.g. \`docReady === true\`). **Do not** show **Ask**, any question input, or an answer panel in step 1. Selecting a file must **not** auto-advance to Q&A unless you also require an explicit **Continue** click so \`docReady\` is unambiguous.
@@ -96,7 +112,18 @@ Rules:
 Output ONLY a valid JSON object in exactly this format. No explanation before 
 or after. No markdown code blocks. Raw JSON only:
 
-For **Tier B** (DigitalOcean Knowledge Base) apps: \`do_services\` must include **"Serverless Inference"**, **"Knowledge Bases"**, and **"Spaces"** (Spaces holds the raw PDF/Word uploads before the KB indexes them), and \`env_vars\` must include \`{ "key": "VITE_DO_KNOWLEDGE_BASE_ID", "source": "user_knowledge_base_id" }\` plus VITE_DO_TOKEN. For **Tier A** (simple document Q&A), image-only, calculators, and other non-KB apps: \`do_services\` is only **["Serverless Inference"]** and **omit** VITE_DO_KNOWLEDGE_BASE_ID from \`env_vars\`. **Tier A document apps:** the emitted \`src/App.jsx\` must use the two-step \`docReady\` pattern (step 1 = document + Continue only; step 2 = labeled question input + styled Ask + answer region) — never the forbidden file+doc+Ask-without-question layout.
+For **Tier 0** (static / no-AI: portfolios, landing pages, marketing sites, resumes, etc.): \`do_services\` MUST be \`[]\` and \`env_vars\` MUST be \`[]\` (no \`VITE_DO_TOKEN\`, no Knowledge Base ID, no proxy keys). The \`.do/app.yaml\` static site MUST omit the \`envs\` block entirely. For **Tier B** (DigitalOcean Knowledge Base) apps: \`do_services\` must include **"Serverless Inference"**, **"Knowledge Bases"**, and **"Spaces"** (Spaces holds the raw PDF/Word uploads before the KB indexes them), and \`env_vars\` must include \`{ "key": "VITE_DO_KNOWLEDGE_BASE_ID", "source": "user_knowledge_base_id" }\` plus VITE_DO_TOKEN. For **Tier A** (simple document Q&A), image-only, calculators, and other non-KB AI apps: \`do_services\` is only **["Serverless Inference"]** and **omit** VITE_DO_KNOWLEDGE_BASE_ID from \`env_vars\`. **Tier A document apps:** the emitted \`src/App.jsx\` must use the two-step \`docReady\` pattern (step 1 = document + Continue only; step 2 = labeled question input + styled Ask + answer region) — never the forbidden file+doc+Ask-without-question layout.
+
+For **Tier 0** apps the spec must look like:
+{
+  "app_name": "short-kebab-case-name",
+  "description": "one sentence describing what this site is",
+  "do_services": [],
+  "env_vars": [],
+  "files": [ /* index.html, src/main.jsx, src/App.jsx, package.json, vite.config.js, .do/app.yaml */ ]
+}
+
+For Tier A / Tier B AI apps, use this shape (Tier B adds Knowledge Bases + Spaces to do_services and VITE_DO_KNOWLEDGE_BASE_ID to env_vars per the rules above):
 
 {
   "app_name": "short-kebab-case-name",
@@ -137,7 +164,18 @@ Do **not** put VITE_INFERENCE_PROXY, VITE_KBAAS_PROXY, VITE_GEN_AI_PROXY, VITE_D
 
 For **Tier B** apps only, the \`.do/app.yaml\` \`envs\` list should also include \`VITE_DO_KNOWLEDGE_BASE_ID\` with a placeholder value string (App Platform / tideAI inject the real UUID at deploy or build). **Tier A** apps should not list that key.
 
-The .do/app.yaml must follow this spec:
+The .do/app.yaml must follow this spec.
+
+For **Tier 0** (no AI, no token needed) — omit the \`envs\` block entirely:
+spec:
+  name: <app_name>
+  static_sites:
+    - name: frontend
+      source_dir: /
+      build_command: npm install && npm run build
+      output_dir: dist
+
+For **Tier A / Tier B** (needs the DO token at build time):
 spec:
   name: <app_name>
   static_sites:

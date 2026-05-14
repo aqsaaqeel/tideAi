@@ -5,19 +5,47 @@
  * the user informed during the ~30–90s while Vite is building.
  */
 
-const STEP_ORDER = [
-  "Understanding your prompt",
-  "Generating code",
-  "Awaiting your approval",
-  "Knowledge base setup",
-  "Spaces bucket setup",
-  "Building static site",
-  "Live preview ready",
-  "Pushing to DOCR",
-  "Deploying to DigitalOcean",
-  "Going live on DigitalOcean",
-  "Verifying public URL",
-];
+/**
+ * Build the expected step list for *this* build, based on the spec the backend
+ * resolved (`do_services`) and the chosen `deploy_mode`. Without this, the
+ * pipeline always rendered "Knowledge base setup" / "Spaces bucket setup" /
+ * DOCR-only steps as ghost "pending" rows even on Tier 0 portfolios or
+ * GitHub / local deploys that never emit those steps.
+ *
+ * @param {{ app_spec?: { do_services?: string[] } | null, deploy_mode?: string }} buildState
+ */
+function expectedStepOrder(buildState) {
+  const services = (buildState?.app_spec?.do_services || []).map((s) =>
+    String(s).toLowerCase()
+  );
+  const usesKb = services.some((s) => s.includes("knowledge"));
+  const usesSpaces = services.some((s) => s.includes("space"));
+  const mode = buildState?.deploy_mode || "docr";
+
+  const order = [
+    "Understanding your prompt",
+    "Generating code",
+    "Awaiting your approval",
+  ];
+  if (usesKb) order.push("Knowledge base setup");
+  if (usesSpaces) order.push("Spaces bucket setup");
+
+  if (mode === "github") {
+    order.push("Creating GitHub repo", "Pushing files", "Deploying to DigitalOcean", "Going live...");
+  } else if (mode === "local") {
+    order.push("Building static site");
+  } else {
+    order.push(
+      "Building static site",
+      "Pushing to DOCR",
+      "Deploying to DigitalOcean",
+      "Going live on DigitalOcean",
+      "Verifying public URL"
+    );
+  }
+
+  return order;
+}
 
 function statusClass(status) {
   if (status === "done") return "done";
@@ -35,14 +63,15 @@ function markerSymbol(status) {
 export default function BuildProgress({ buildState }) {
   const steps = buildState?.steps || [];
   const byName = new Map(steps.map((s) => [s.step, s]));
+  const stepOrder = expectedStepOrder(buildState);
 
-  const ordered = STEP_ORDER.map((name) => {
+  const ordered = stepOrder.map((name) => {
     const found = byName.get(name);
     return found || { step: name, status: "pending", detail: "" };
   });
   /** Include any unexpected steps the backend emitted that we didn't anticipate. */
   for (const s of steps) {
-    if (!STEP_ORDER.includes(s.step)) ordered.push(s);
+    if (!stepOrder.includes(s.step)) ordered.push(s);
   }
 
   return (
