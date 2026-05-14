@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>tideAI — Demo deck</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #050810;
+        --bg-soft: #0c1322;
+        --fg: #f1f5f9;
+        --fg-muted: rgba(241, 245, 249, 0.7);
+        --fg-faint: rgba(241, 245, 249, 0.45);
+        --accent: #0069ff;
+        --accent-soft: rgba(0, 105, 255, 0.2);
+        --success: #3ecf8e;
+        --border: rgba(255, 255, 255, 0.1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        font-family: "Inter", system-ui, sans-serif;
+        background:
+          radial-gradient(55% 45% at 50% 0%, rgba(0, 105, 255, 0.22) 0%, transparent 65%),
+          radial-gradient(35% 35% at 95% 15%, rgba(62, 207, 142, 0.12) 0%, transparent 70%),
+          linear-gradient(180deg, var(--bg) 0%, var(--bg-soft) 100%);
+        color: var(--fg);
+        -webkit-font-smoothing: antialiased;
+        overflow: hidden;
+      }
+
+      .deck {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .slide-area {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: clamp(1rem, 4vw, 3rem);
+        min-height: 0;
+      }
+
+      .slide {
+        display: none;
+        width: min(960px, 100%);
+        animation: enter 0.45s ease;
+      }
+
+      .slide.active {
+        display: block;
+      }
+
+      @keyframes enter {
+        from {
+          opacity: 0;
+          transform: translateY(12px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .slide h1 {
+        font-size: clamp(2rem, 5vw, 3rem);
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        margin: 0 0 0.75rem;
+        line-height: 1.1;
+      }
+
+      .slide h2 {
+        font-size: clamp(1.35rem, 3vw, 2rem);
+        font-weight: 600;
+        margin: 0 0 1rem;
+        letter-spacing: -0.02em;
+      }
+
+      .slide p,
+      .slide li {
+        font-size: clamp(1rem, 2vw, 1.15rem);
+        color: var(--fg-muted);
+        line-height: 1.6;
+        margin: 0 0 0.85rem;
+      }
+
+      .slide ul {
+        margin: 0;
+        padding-left: 1.25rem;
+      }
+
+      .slide li {
+        margin-bottom: 0.5rem;
+      }
+
+      .badge {
+        display: inline-block;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--accent);
+        background: var(--accent-soft);
+        border: 1px solid rgba(0, 105, 255, 0.35);
+        padding: 0.35rem 0.65rem;
+        border-radius: 999px;
+        margin-bottom: 1rem;
+      }
+
+      .subtitle {
+        font-size: clamp(1.1rem, 2.2vw, 1.35rem);
+        color: var(--fg-muted);
+        max-width: 36ch;
+      }
+
+      .flow {
+        display: grid;
+        gap: 0.65rem;
+        margin-top: 1.25rem;
+      }
+
+      @media (min-width: 640px) {
+        .flow {
+          grid-template-columns: repeat(2, 1fr);
+        }
+      }
+
+      .flow-step {
+        display: flex;
+        gap: 0.75rem;
+        align-items: flex-start;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1rem 1.1rem;
+      }
+
+      .flow-step .body {
+        min-width: 0;
+      }
+
+      .flow-step strong {
+        display: block;
+        color: var(--fg);
+        font-size: 0.95rem;
+        margin-bottom: 0.35rem;
+      }
+
+      .flow-step .desc {
+        font-size: 0.9rem;
+        color: var(--fg-muted);
+        line-height: 1.5;
+      }
+
+      .flow-step .num {
+        flex-shrink: 0;
+        width: 1.75rem;
+        height: 1.75rem;
+        border-radius: 8px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-weight: 700;
+        font-size: 0.85rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .callout {
+        margin-top: 1.25rem;
+        padding: 1rem 1.15rem;
+        border-radius: 12px;
+        border: 1px solid rgba(62, 207, 142, 0.35);
+        background: rgba(62, 207, 142, 0.08);
+        color: var(--fg-muted);
+        font-size: 0.95rem;
+      }
+
+      .callout.warn {
+        border-color: rgba(245, 165, 36, 0.4);
+        background: rgba(245, 165, 36, 0.08);
+      }
+
+      .toolbar {
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.75rem clamp(1rem, 3vw, 2rem);
+        border-top: 1px solid var(--border);
+        background: rgba(5, 8, 16, 0.85);
+        backdrop-filter: blur(10px);
+      }
+
+      .dots {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        justify-content: center;
+        flex: 1;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        border: none;
+        padding: 0;
+        background: rgba(255, 255, 255, 0.2);
+        cursor: pointer;
+        transition: transform 0.15s, background 0.15s;
+      }
+
+      .dot:hover {
+        transform: scale(1.15);
+      }
+
+      .dot[aria-current="true"] {
+        background: var(--accent);
+      }
+
+      .nav-btns {
+        display: flex;
+        gap: 0.5rem;
+      }
+
+      .btn {
+        font: inherit;
+        font-weight: 500;
+        font-size: 0.9rem;
+        color: var(--fg);
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 0.55rem 1rem;
+        cursor: pointer;
+        transition: background 0.15s, border-color 0.15s;
+      }
+
+      .btn:hover {
+        background: rgba(255, 255, 255, 0.12);
+        border-color: rgba(255, 255, 255, 0.18);
+      }
+
+      .btn-primary {
+        background: var(--accent);
+        border-color: transparent;
+      }
+
+      .btn-primary:hover {
+        background: #2a82ff;
+      }
+
+      .btn:disabled {
+        cursor: not-allowed;
+      }
+
+      .hint {
+        font-size: 0.75rem;
+        color: var(--fg-faint);
+        white-space: nowrap;
+      }
+
+      @media (max-width: 520px) {
+        .hint {
+          display: none;
+        }
+      }
+
+      .logo-row {
+        display: flex;
+        align-items: baseline;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+      }
+
+      .logo-row span {
+        font-size: 0.9rem;
+        color: var(--fg-faint);
+        font-weight: 500;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="deck" id="deck">
+      <div class="slide-area" aria-live="polite">
+        <!-- 1 -->
+        <section class="slide active" data-slide="0">
+          <div class="badge">Demo deck</div>
+          <div class="logo-row">
+            <h1>tideAI</h1>
+            <span>idea → live app on DigitalOcean</span>
+          </div>
+          <p class="subtitle">
+            A small “Lovable-style” builder for teams who want AI-generated React apps deployed without wiring
+            GitHub, Docker, and App Platform by hand—on every try.
+          </p>
+        </section>
+
+        <!-- 2 -->
+        <section class="slide" data-slide="1">
+          <h2>The problem</h2>
+          <p>
+            Shipping a front-end prototype usually means juggling codegen, a build, a container or static host, a
+            registry, and an App Platform spec—before you even get a shareable URL.
+          </p>
+          <p>tideAI compresses that into one guided flow from a single product idea.</p>
+        </section>
+
+        <!-- 3 -->
+        <section class="slide" data-slide="2">
+          <h2>What tideAI does</h2>
+          <p>
+            You enter a <strong style="color: var(--fg)">one-line product idea</strong> and a
+            <strong style="color: var(--fg)">DigitalOcean API token</strong>. The service generates a full
+            <strong style="color: var(--fg)">React + Vite</strong> project, builds it, pushes an image to
+            <strong style="color: var(--fg)">DOCR</strong>, and creates an <strong style="color: var(--fg)">App Platform</strong> app—then returns a
+            <strong style="color: var(--success)">live URL</strong>.
+          </p>
+          <p>By default it does <strong style="color: var(--fg)">not</strong> require GitHub.</p>
+        </section>
+
+        <!-- 4 -->
+        <section class="slide" data-slide="3">
+          <h2>How it works (pipeline)</h2>
+          <div class="flow">
+            <div class="flow-step">
+              <span class="num">1</span>
+              <div class="body">
+                <strong>Inference</strong>
+                <span class="desc">DigitalOcean Serverless Inference turns your idea into project files as JSON.</span>
+              </div>
+            </div>
+            <div class="flow-step">
+              <span class="num">2</span>
+              <div class="body">
+                <strong>Parse &amp; write</strong>
+                <span class="desc">Files land in a temp folder; npm install and npm run build run on the server.</span>
+              </div>
+            </div>
+            <div class="flow-step">
+              <span class="num">3</span>
+              <div class="body">
+                <strong>Image</strong>
+                <span class="desc">Built dist/ is packaged with a tiny busybox httpd layer for serving.</span>
+              </div>
+            </div>
+            <div class="flow-step">
+              <span class="num">4</span>
+              <div class="body">
+                <strong>Registry</strong>
+                <span class="desc">Image is pushed to DOCR via the Registry HTTP API (no local Docker daemon).</span>
+              </div>
+            </div>
+            <div class="flow-step" style="grid-column: 1 / -1">
+              <span class="num">5</span>
+              <div class="body">
+                <strong>App Platform</strong>
+                <span class="desc">An app is created from that image; the UI polls until the live URL is ready.</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 5 -->
+        <section class="slide" data-slide="4">
+          <h2>Stack used in tideAI</h2>
+          <ul>
+            <li><strong style="color: var(--fg)">UI:</strong> minimal React + Vite SPA talking to Express.</li>
+            <li><strong style="color: var(--fg)">Backend:</strong> Node + Express orchestrates inference, build, DOCR, deploy.</li>
+            <li><strong style="color: var(--fg)">Default model:</strong> llama3.3-70b-instruct (override with INFERENCE_MODEL).</li>
+          </ul>
+          <div class="callout">
+            Prerequisites for the happy path: DO token with Inference + Apps + Registry; Container Registry on the
+            account; outbound HTTPS (e.g. busybox binary fetch unless customized).
+          </div>
+        </section>
+
+
+
+
+        <!-- 8 -->
+        <section class="slide" data-slide="7">
+          <h2>Demo</h2>
+          <ol style="color: var(--fg-muted); padding-left: 1.25rem; margin: 0">
+            <li style="margin-bottom: 0.6rem">Open the tideAI UI (local Vite or deployed App Platform URL).</li>
+            <li style="margin-bottom: 0.6rem">Paste a crisp product one-liner (e.g. “A landing page for a waitlist with email capture”).</li>
+            <li style="margin-bottom: 0.6rem">Paste a DO personal access token with the right scopes.</li>
+            <li style="margin-bottom: 0.6rem">Submit and narrate progress: codegen → build → push → app create → URL.</li>
+            <li>Open the child app URL and show it running in production.</li>
+          </ol>
+        </section>
+
+        <!-- 9 -->
+        <section class="slide" data-slide="8">
+          <h2>Wrap-up</h2>
+          <p>
+            tideAI is a focused demo of “prompt to production” on DigitalOcean—good for founders, platform teams,
+            and anyone selling DO App Platform + Inference + Registry together.
+          </p>
+          <p style="margin-top: 1.25rem; color: var(--fg-faint); font-size: 0.95rem">Questions?</p>
+        </section>
+      </div>
+
+      <footer class="toolbar">
+        <span class="hint">← → Space · tap dots</span>
+        <div class="dots" id="dots" role="tablist" aria-label="Slides"></div>
+        <div class="nav-btns">
+          <button type="button" class="btn" id="prev">Back</button>
+          <button type="button" class="btn btn-primary" id="next">Next</button>
+        </div>
+      </footer>
+    </div>
+
+    <script>
+      (function () {
+        var slides = Array.prototype.slice.call(document.querySelectorAll(".slide"));
+        var total = slides.length;
+        var index = 0;
+        var dotsEl = document.getElementById("dots");
+        var prevBtn = document.getElementById("prev");
+        var nextBtn = document.getElementById("next");
+
+        function renderDots() {
+          dotsEl.innerHTML = "";
+          for (var i = 0; i < total; i++) {
+            var b = document.createElement("button");
+            b.type = "button";
+            b.className = "dot";
+            b.setAttribute("role", "tab");
+            b.setAttribute("aria-label", "Go to slide " + (i + 1));
+            b.setAttribute("aria-current", i === index ? "true" : "false");
+            b.addEventListener("click", function (j) {
+              return function () {
+                go(j);
+              };
+            }(i));
+            dotsEl.appendChild(b);
+          }
+        }
+
+        function go(i) {
+          if (i < 0 || i >= total) return;
+          index = i;
+          slides.forEach(function (el, j) {
+            el.classList.toggle("active", j === index);
+          });
+          var dots = dotsEl.querySelectorAll(".dot");
+          dots.forEach(function (d, j) {
+            d.setAttribute("aria-current", j === index ? "true" : "false");
+          });
+          prevBtn.disabled = index === 0;
+          nextBtn.disabled = index === total - 1;
+          prevBtn.style.opacity = index === 0 ? "0.45" : "1";
+          nextBtn.style.opacity = index === total - 1 ? "0.45" : "1";
+        }
+
+        prevBtn.addEventListener("click", function () {
+          go(index - 1);
+        });
+        nextBtn.addEventListener("click", function () {
+          go(index + 1);
+        });
+
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "ArrowRight" || e.key === " " || e.key === "PageDown") {
+            e.preventDefault();
+            go(index + 1);
+          } else if (e.key === "ArrowLeft" || e.key === "PageUp") {
+            e.preventDefault();
+            go(index - 1);
+          } else if (e.key === "Home") {
+            go(0);
+          } else if (e.key === "End") {
+            go(total - 1);
+          }
+        });
+
+        renderDots();
+        go(0);
+      })();
+    </script>
+  </body>
+</html>
